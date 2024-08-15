@@ -24,6 +24,11 @@ git checkout --quiet msentraid -- "${FILES[@]}"
 # restore it to its original state
 git reset --quiet HEAD -- "${FILES[@]}"
 
+# Replace the version in snap/snapcraft.yaml with the branch name
+# followed by the commit hash
+VERSION="$(git rev-parse --abbrev-ref HEAD)~$(git rev-parse --short HEAD)"
+sed -i 's/^version:.*/version: '"$VERSION"'/' snap/snapcraft.yaml
+
 # On exit, restore the files to their original state
 # shellcheck disable=SC2064
 trap "git checkout -- ${FILES[*]}" EXIT
