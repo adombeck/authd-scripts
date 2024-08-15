@@ -1,0 +1,42 @@
+#!/bin/bash
+
+set -euo pipefail
+
+AUTHD_SERVICE="authd.service"
+AUTHD_MSENTRAID_SERVICE="snap.authd-msentraid.authd-msentraid.service"
+AUTHD_PPA="ubuntu-enterprise-desktop/authd-edge"
+AUTHD_PACKAGE="authd"
+AUTHD_MSENTRAID_SNAP="authd-msentraid"
+AUTHD_CACHE_DIR="/var/cache/authd"
+AUTHD_MSENTRAID_CACHE_DIR="/var/snap/authd-msentraid/current/cache"
+
+# Stop the services if they are running
+for service in "$AUTHD_SERVICE" "$AUTHD_MSENTRAID_SERVICE"; do
+    sudo systemctl stop "$service" || true
+done
+
+# Purge the authd package
+sudo apt-get remove --purge -y "$AUTHD_PACKAGE"
+
+# Purge the authd-msentraid snap
+sudo snap remove --purge "$AUTHD_MSENTRAID_SNAP"
+
+# Remove the cache directories
+sudo rm -rf "$AUTHD_CACHE_DIR" "$AUTHD_MSENTRAID_CACHE_DIR"
+
+# Add the PPA if it's not already added
+if add-apt-repository --list | grep -q "$AUTHD_PPA"; then
+    sudo add-apt-repository -y "ppa:$AUTHD_PPA"
+    sudo apt-get update
+fi
+
+# Install the authd package
+sudo apt-get install -y "$AUTHD_PACKAGE"
+
+# Install the authd-msentraid snap from the edge channel
+sudo snap install "$AUTHD_MSENTRAID_SNAP" --edge
+
+# Check that the services are running
+for service in "$AUTHD_SERVICE" "$AUTHD_MSENTRAID_SERVICE"; do
+    sudo systemctl --no-pager -l status "$service"
+done
