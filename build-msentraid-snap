@@ -1,0 +1,32 @@
+#!/bin/bash
+
+set -euo pipefail
+
+FILES=(
+    snap/snapcraft.yaml
+    internal/consts/authd.go
+)
+
+# Abort if any of the necessary files have uncommitted changes which
+# would be overwritten by the checkout
+for file in "${FILES[@]}"; do
+    if git diff --quiet -- "$file" && git diff --staged --quiet -- "$file"; then
+        continue
+    fi
+
+    echo "Error: $file has uncommitted changes"
+    exit 1
+done
+
+# Check out the necessary files from the msentraid branch
+git checkout --quiet msentraid -- "${FILES[@]}"
+# Unstage the files so that a simple `git checkout -- <file>` will
+# restore it to its original state
+git reset --quiet HEAD -- "${FILES[@]}"
+
+# On exit, restore the files to their original state
+# shellcheck disable=SC2064
+trap "git checkout -- ${FILES[*]}" EXIT
+
+# Build the snap
+snapcraft "$@"
