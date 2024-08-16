@@ -1,6 +1,7 @@
 #!/bin/bash
 
 set -euo pipefail
+set -x
 
 AUTHD_SERVICE="authd.service"
 AUTHD_MSENTRAID_SERVICE="snap.authd-msentraid.authd-msentraid.service"
@@ -9,34 +10,88 @@ AUTHD_PACKAGE="authd"
 AUTHD_MSENTRAID_SNAP="authd-msentraid"
 AUTHD_CACHE_DIR="/var/cache/authd"
 AUTHD_MSENTRAID_CACHE_DIR="/var/snap/authd-msentraid/current/cache"
+AUTHD_MSENTRAID_CONFIG_FILE="/var/snap/authd-msentraid/current/broker.conf"
+
+print_usage() {
+    cat <<EOF
+Usage: $0 [--keep-broker-config]
+EOF
+}
+
+# Ensure that the script is running as root
+if [[ $EUID -ne 0 ]]; then
+    exec sudo --preserve-env "$0" "$@"
+fi
+
+POSITIONAL=()
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -h|--help)
+            print_usage
+            exit 0
+            ;;
+        --keep-broker-config)
+            KEEP_BROKER_CONFIG=true
+            shift
+            ;;
+        *)
+            POSITIONAL+=("$1")
+            shift
+            ;;
+    esac
+done
+set -- "${POSITIONAL[@]}"
+
+if [ -n "${KEEP_BROKER_CONFIG:-}" ] && [ -f "$AUTHD_MSENTRAID_CONFIG_FILE" ]; then
+    TMP_CONFIG_FILE=$(mktemp)
+    cp -a "$AUTHD_MSENTRAID_CONFIG_FILE" "$TMP_CONFIG_FILE"
+fi
 
 # Stop the services if they are running
-for service in "$AUTHD_SERVICE" "$AUTHD_MSENTRAID_SERVICE"; do
-    sudo systemctl stop "$service" || true
-done
+systemctl stop "$AUTHD_SERVICE" "$AUTHD_MSENTRAID_SERVICE" || true
 
 # Purge the authd package
-sudo apt-get remove --purge -y "$AUTHD_PACKAGE"
+apt-get remove --purge -y "$AUTHD_PACKAGE"
 
 # Purge the authd-msentraid snap
-sudo snap remove --purge "$AUTHD_MSENTRAID_SNAP"
+snap remove --purge "$AUTHD_MSENTRAID_SNAP"
 
 # Remove the cache directories
-sudo rm -rf "$AUTHD_CACHE_DIR" "$AUTHD_MSENTRAID_CACHE_DIR"
+rm -rf "$AUTHD_CACHE_DIR" "$AUTHD_MSENTRAID_CACHE_DIR"
 
 # Add the PPA if it's not already added
-if add-apt-repository --list | grep -q "$AUTHD_PPA"; then
-    sudo add-apt-repository -y "ppa:$AUTHD_PPA"
-    sudo apt-get update
+if ! add-apt-repository --list | grep -q "$AUTHD_PPA"; then
+    add-apt-repository -y "ppa:$AUTHD_PPA"
+    apt-get update
 fi
 
 # Install the authd package
-sudo apt-get install -y "$AUTHD_PACKAGE"
+apt-get install -y "$AUTHD_PACKAGE"
 
 # Install the authd-msentraid snap from the edge channel
-sudo snap install "$AUTHD_MSENTRAID_SNAP" --edge
+snap install "$AUTHD_MSENTRAID_SNAP" --edge
+
+# Restore the broker config file if it was backed up
+if [ -n "${KEEP_BROKER_CONFIG:-}" ]; then
+    mv --force "$TMP_CONFIG_FILE" "$AUTHD_MSENTRAID_CONFIG_FILE"
+    systemctl restart "$AUTHD_MSENTRAID_SERVICE"
+fi
 
 # Check that the services are running
 for service in "$AUTHD_SERVICE" "$AUTHD_MSENTRAID_SERVICE"; do
-    sudo systemctl --no-pager -l status "$service"
+    systemctl --no-pager -l status "$service"
 done
+
+if [ -z "${KEEP_BROKER_CONFIG:-}" ]; then
+    cat <<EOF
+
+Don't forget to configure the OIDC issuer and client ID in:
+
+  /var/snap/authd-msentraid/current/broker.conf
+
+and then restart the authd-msentraid service:
+
+  sudo systemctl restart snap.authd-msentraid.authd-msentraid.service
+
+EOF
+fi
