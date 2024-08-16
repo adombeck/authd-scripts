@@ -1,0 +1,56 @@
+#!/bin/bash
+
+set -euo pipefail
+
+gnome-text-editor - <<EOF
+### Environment
+
+#### authd version
+
+\`\`\`raw
+$(/usr/libexec/authd version)
+\`\`\`raw
+
+#### broker version
+\`\`\`
+$(snap info authd-msentraid)
+\`\`\`
+
+#### gnome shell version
+\`\`\`
+$(apt policy gnome-shell)
+\`\`\`
+
+#### Distribution
+\`\`\`
+$(lsb_release -a)
+\`\`\`
+
+### Logs
+
+#### Authd logs
+
+\`\`\`raw
+$(journalctl -b -u authd.service)
+\`\`\`
+
+#### MS Entra ID broker logs
+
+\`\`\`raw
+$(journalctl -b -u snap.authd-msentraid.authd-msentraid.service)
+\`\`\`
+
+### Configuration
+
+### Authd broker configuration
+
+\`\`\`
+$(cat /etc/authd/brokers.d/msentraid.conf)
+\`\`\`
+
+### MS Entra ID broker configuration
+
+\`\`\`
+$(cat /var/snap/authd-msentraid/current/broker.conf)
+\`\`\`
+EOF
