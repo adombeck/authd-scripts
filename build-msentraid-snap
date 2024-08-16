@@ -26,7 +26,11 @@ git reset --quiet HEAD -- "${FILES[@]}"
 
 # Replace the version in snap/snapcraft.yaml with the branch name
 # followed by the commit hash
-VERSION="$(git rev-parse --abbrev-ref HEAD)~$(git rev-parse --short HEAD)"
+BRANCH_NAME="$(git rev-parse --abbrev-ref HEAD)"
+# Snap versions are limited to 32 characters, so we truncate the
+# branch name and commit hash to 23 and 8 characters respectively.
+VERSION="${BRANCH_NAME:0:23}~$(git rev-parse --short=8 HEAD)"
+echo "Setting snap version to $VERSION"
 sed -i 's/^version:.*/version: '"$VERSION"'/' snap/snapcraft.yaml
 
 # On exit, restore the files to their original state
