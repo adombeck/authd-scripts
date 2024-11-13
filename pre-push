@@ -1,0 +1,18 @@
+#!/bin/sh
+
+set -eu
+
+if ! golangci-lint run; then
+    echo >&2 "pre-push: Error: golangci-lint failed"
+    FAILED=1
+fi
+
+# Check if the strings "DO-NOT-PUSH" or "XXX" are present in the diff with main
+if git diff main | grep -e DO-NOT-PUSH -e XXX | grep -v "mktemp"; then
+    echo >&2 "pre-push: Error: Found string DO-NOT-PUSH or XXX"
+    FAILED=1
+fi
+
+if [ -n "${FAILED:-}" ]; then
+    exit 1
+fi
