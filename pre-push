@@ -5,6 +5,12 @@ set -x
 
 go mod vendor
 
+if cargo metadata --no-deps --frozen --quiet >/dev/null 2>&1 && ! cargo fmt --check; then
+    set +x
+    echo >&2 "pre-push: Error: cargo fmt failed"
+    FAILED=1
+fi
+
 if ! golangci-lint run; then
     set +x
     echo >&2 "pre-push: Error: golangci-lint failed"
