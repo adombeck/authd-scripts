@@ -3,6 +3,8 @@
 set -eu
 set -x
 
+go mod vendor
+
 if ! golangci-lint run; then
     set +x
     echo >&2 "pre-push: Error: golangci-lint failed"
