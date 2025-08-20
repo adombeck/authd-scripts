@@ -1,0 +1,112 @@
+#!/bin/bash
+
+set -eu
+set -x
+
+usage(){
+    cat << EOF
+Usage: $0 [--version <version>] [-h|--help]
+
+Build the broker binary.
+
+Options:
+  --version <version>  Version to set in the binary.
+  --on-msentraid-build-branch  Automatically check out a msentraid-build branch based on the msentraid branch with
+                               the commits that are not in the main branch cherry-picked.
+  -h, --help           Show this help message and exit.
+EOF
+}
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --version)
+            VERSION="$2"
+            shift 2
+            ;;
+        --on-msentraid-build-branch)
+            MSENTRAID_BUILD_BRANCH=1
+            shift
+            ;;
+        --skip-libhimmelblau)
+            SKIP_LIBHIMMELBLAU=1
+            shift
+            ;;
+        *)
+            echo "Unknown option: $1"
+            exit 1
+            ;;
+    esac
+done
+
+if [ -z "${VERSION:-}" ]; then
+    # Build the semver tool
+    go -C tools build -o semver ./semver
+    # Get the version
+    VERSION=$(SEMVER=tools/semver/semver ./snap/version)
+fi
+
+if [ -n "${MSENTRAID_BUILD_BRANCH:-}" ]; then
+    ORIG_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+
+    # Make sure that the msentraid-build branch does not exist
+    git branch -D msentraid-build 2>/dev/null || true
+
+    # Stash any uncommitted changes
+    git stash push -m "Stash before creating msentraid-build branch"
+
+    git -C third_party/libhimmelblau stash push -m "Stash before creating msentraid-build branch"
+
+    # Create a new branch based on the msentraid branch with the commits that are not in the main branch cherry-picked
+    git checkout -b msentraid-build msentraid
+    git cherry-pick main..${ORIG_BRANCH}
+    git submodule update
+
+    # Pop the stash if it exists
+    if git stash list | head -n1 | grep -q "Stash before creating msentraid-build branch"; then
+        git stash pop --quiet
+    fi
+    if git -C third_party/libhimmelblau stash list | head -n1 | grep -q "Stash before creating msentraid-build branch"; then
+        git -C third_party/libhimmelblau stash pop --quiet
+    fi
+
+    cleanup() {
+        # Disable xtrace so that error messages during the build are easier to spot,
+        # as xtrace output would push them up and make them harder to find at the bottom.
+        set +x
+
+        # Stash any uncommitted changes before returning to the original branch
+        git stash push --quiet -m "Stash before returning to original branch"
+
+        # Return to the original branch
+        git checkout --quiet "$ORIG_BRANCH"
+
+        # Pop the stash if it exists
+        if git stash list | head -n1 | grep -q "Stash before returning to original branch"; then
+            git stash pop --quiet
+        fi
+        if git -C third_party/libhimmelblau stash list | head -n1 | grep -q "Stash before returning to original branch"; then
+            git -C third_party/libhimmelblau stash pop --quiet
+        fi
+    }
+    trap cleanup EXIT
+fi
+
+go mod vendor
+
+if git grep -q authd-msentraid snap/snapcraft.yaml; then
+    args="-tags=withmsentraid -o authd-msentraid"
+
+    if [ -z "${SKIP_LIBHIMMELBLAU:-}" ]; then
+        # Build the libhimmelblau binary and header
+        go generate ./internal/providers/msentraid/...
+    fi
+elif git grep -q authd-google snap/snapcraft.yaml; then
+    args="-tags=withgoogle -o authd-google"
+else
+    echo >&2 "Neither authd-msentraid nor authd-google found in snapcraft.yaml."
+    exit 1
+fi
+
+export GOFLAGS="-ldflags=-X=github.com/ubuntu/authd-oidc-brokers/internal/consts.Version=${VERSION}"
+go build -v ${args} ./cmd/authd-oidc
