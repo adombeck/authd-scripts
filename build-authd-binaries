@@ -36,17 +36,18 @@ fi
 go mod vendor
 
 go generate -C internal/proto/authd
+go generate -C pam/internal/gdm
 
-go build -o authd ./cmd/authd
+go build -v -o authd ./cmd/authd
 
 go generate -C pam -x -tags pam_debug
 
-go build -C pam .
+go build -C pam -v .
 
 if [ -d ./cmd/authctl ]; then
-    go build -o authctl ./cmd/authctl
+    go build -v -o authctl ./cmd/authctl
 fi
 
-# This file gets updated but the change depends on the locally installed
+# Some protobuf files get updated but the change depends on the locally installed
 # version of protoc (I think) so I don't want to commit it
-git checkout pam/internal/proto/pam.pb.go
+git checkout "*.pb.go"
