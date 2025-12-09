@@ -4,8 +4,33 @@ set -euo pipefail
 
 FILES=(
     snap/snapcraft.yaml
+    conf/authd.conf
     internal/consts/authd.go
 )
+
+usage() {
+    echo "Usage: $0 [--local-branch] [snapcraft options]"
+    echo
+    echo "Build the msentraid snap."
+    echo
+    echo "Options:"
+    echo "  --local-branch  Use the local msentraid branch instead of origin/msentraid"
+    echo
+    echo "All other options are passed to snapcraft."
+    exit 1
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --local-branch)
+            LOCAL_BRANCH=1
+            shift
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
 
 # Abort if any of the necessary files have uncommitted changes which
 # would be overwritten by the checkout
@@ -18,8 +43,18 @@ for file in "${FILES[@]}"; do
     exit 1
 done
 
+set -x
+go mod vendor
+
+if [ -n "${LOCAL_BRANCH:-}" ]; then
+    BRANCH=${BRANCH:-msentraid}
+else
+    BRANCH=${BRANCH:-origin/msentraid}
+fi
+
 # Check out the necessary files from the msentraid branch
-git checkout --quiet msentraid -- "${FILES[@]}"
+git checkout --quiet "${BRANCH}" -- "${FILES[@]}"
+
 # Unstage the files so that a simple `git checkout -- <file>` will
 # restore it to its original state
 git reset --quiet HEAD -- "${FILES[@]}"
