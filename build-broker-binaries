@@ -3,8 +3,9 @@
 set -eu
 set -x
 
-MSENTRAID_BUILD_DIR="../msentraid-broker-build-dir"
-LIBHIMMELBLAU_DIR="third_party/libhimmelblau"
+BUILD_DIR="../broker-build-dir"
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+LIB_DIR="${SCRIPT_DIR}/lib"
 
 usage(){
     cat << EOF
@@ -14,8 +15,8 @@ Build the broker binary.
 
 Options:
   --version <version>  Version to set in the binary.
-  --on-msentraid-build-branch  Automatically check out a msentraid-build branch based on the msentraid branch with
-                               the commits that are not in the main branch cherry-picked.
+  --base-branch <branch> Automatically check out a build branch based on the specified branch with
+                         the commits that are not in the main branch cherry-picked.
   -h, --help           Show this help message and exit.
 EOF
 }
@@ -27,9 +28,9 @@ while [[ $# -gt 0 ]]; do
             VERSION="$2"
             shift 2
             ;;
-        --on-msentraid-build-branch)
-            MSENTRAID_BUILD_BRANCH=1
-            shift
+        --base-branch)
+            BASE_BRANCH="$2"
+            shift 2
             ;;
         --skip-libhimmelblau)
             SKIP_LIBHIMMELBLAU=1
@@ -49,86 +50,10 @@ if [ -z "${VERSION:-}" ]; then
     VERSION=$(SEMVER=tools/semver/semver ./snap/version)
 fi
 
-if [ -n "${MSENTRAID_BUILD_BRANCH:-}" ]; then
-    ORIG_BRANCH=$(git rev-parse --abbrev-ref HEAD)
-    ORIG_DIR=$(pwd)
-
-    # Export uncommitted changes from main repo
-    git diff > /tmp/uncommitted.patch
-    git diff --staged >> /tmp/uncommitted.patch
-
-    if ! git submodule status "${LIBHIMMELBLAU_DIR}" &> /dev/null; then
-        IGNORE_LIBHIMMELBLAU=1
-    fi
-
-    if [ -z "${IGNORE_LIBHIMMELBLAU:-}" ]; then
-        LIBHIMMELBLAU_COMMIT=$(git -C "${LIBHIMMELBLAU_DIR}" rev-parse HEAD)
-        git -C "${LIBHIMMELBLAU_DIR}" diff "${LIBHIMMELBLAU_COMMIT}" > /tmp/libhimmelblau_uncommitted.patch
-
-        # Ensure that the current commit of the libhimmelblau submodule is a reference that can be fetched
-        LIBHIMMELBLAU_BRANCH="msentraid-build-${RANDOM}"
-        git -C "${LIBHIMMELBLAU_DIR}" branch -f "${LIBHIMMELBLAU_BRANCH}" HEAD
-    fi
-
-    if [ ! -d "${MSENTRAID_BUILD_DIR}" ]; then
-        # Clone the msentraid build directory if it doesn't exist
-        git clone --recurse-submodules "$(pwd)" "${MSENTRAID_BUILD_DIR}"
-        git -C "${MSENTRAID_BUILD_DIR}/${LIBHIMMELBLAU_DIR}" remote set-url origin "${ORIG_DIR}/${LIBHIMMELBLAU_DIR}"
-    fi
-
-    # Switch to the msentraid build directory
-    pushd "${MSENTRAID_BUILD_DIR}"
-    git fetch origin
-    git -C "${LIBHIMMELBLAU_DIR}" fetch origin
-    git reset --hard
-
-    # Create a new branch based on the msentraid branch with the commits that are not in the main branch cherry-picked
-    git checkout msentraid-build
-    git reset --hard origin/msentraid
-    git cherry-pick --abort || true # Abort any previous cherry-pick operation
-    git cherry-pick origin/main..origin/"${ORIG_BRANCH}"
-    git submodule update
-
-    # Checkout the libhimmelblau commit in the submodule
-    if [ -z "${IGNORE_LIBHIMMELBLAU:-}" ]; then
-        git -C "${LIBHIMMELBLAU_DIR}" checkout "${LIBHIMMELBLAU_COMMIT}"
-    fi
-
-    # Apply uncommitted changes from the main repo
-    if [ -s /tmp/uncommitted.patch ]; then
-        git apply /tmp/uncommitted.patch
-    fi
-    if [ -s /tmp/libhimmelblau_uncommitted.patch ]; then
-        git -C "${LIBHIMMELBLAU_DIR}" apply /tmp/libhimmelblau_uncommitted.patch
-    fi
-
-    git restore-mtime
-    if [ -z "${IGNORE_LIBHIMMELBLAU:-}" ]; then
-        git -C "${LIBHIMMELBLAU_DIR}" restore-mtime
-    fi
-
-    cleanup() {
-        echo >&2 "---------- Cleaning up ----------"
-
-        # Return to the original directory
-        popd
-
-        if [ -z "${IGNORE_LIBHIMMELBLAU:-}" ]; then
-            # Delete the temporary libhimmelblau branch
-            git -C "${LIBHIMMELBLAU_DIR}" branch -D "${LIBHIMMELBLAU_BRANCH}" || true
-        fi
-
-        # Print a message that the build failed if the exit code is non-zero
-        if [ "$EXIT_CODE" -ne 0 ]; then
-            echo >&2 "❌ Error: Build failed with exit code $EXIT_CODE, see above for details."
-            exit "$EXIT_CODE"
-        else
-            echo >&2 "✅ Build completed successfully."
-        fi
-    }
-    if [ -z "${SKIP_CLEANUP:-}" ]; then
-        trap 'EXIT_CODE=$?; set +x; cleanup' EXIT
-    fi
+if [ -n "${BASE_BRANCH:-}" ]; then
+    # shellcheck source=./lib/broker-build.sh
+    source "${LIB_DIR}/broker-build.sh"
+    create_and_switch_to_broker_build_dir "${BASE_BRANCH}" "${BUILD_DIR}"
 fi
 
 go mod vendor
@@ -138,9 +63,9 @@ if git grep -q authd-msentraid snap/snapcraft.yaml; then
 
     if [ -z "${SKIP_LIBHIMMELBLAU:-}" ]; then
         # Build the libhimmelblau binary and header
-        go generate ./internal/providers/msentraid/...
-        if [ -n "${MSENTRAID_BUILD_BRANCH:-}" ]; then
-            cp ./internal/providers/msentraid/himmelblau.h "${ORIG_DIR}"/internal/providers/msentraid/himmelblau.h
+        RELEASE=1 go generate ./internal/providers/msentraid/himmelblau/...
+        if [ -n "${BASE_BRANCH:-}" ]; then
+            cp ./internal/providers/msentraid/himmelblau/himmelblau.h "${ORIG_DIR}"/internal/providers/msentraid/himmelblau.h
         fi
     fi
 elif git grep -q authd-google snap/snapcraft.yaml; then

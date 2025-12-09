@@ -1,0 +1,68 @@
+#!/bin/bash
+
+set -euo pipefail
+
+BUILD_DIR="../broker-snap-build-dir"
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+LIB_DIR="${SCRIPT_DIR}/lib"
+
+usage() {
+    echo "Usage: $0 --broker <broker> [--local-branch] [snapcraft options]"
+    echo
+    echo "Build the broker snap."
+    echo
+    echo "Options:"
+    echo "  --broker <broker>  The broker to use (msentraid or google)."
+    echo "  --local-branch  Use the local <broker> branch instead of origin/<broker>"
+    echo
+    echo "All other options are passed to snapcraft."
+    exit 1
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --base-branch)
+            BASE_BRANCH="$2"
+            shift 2
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
+
+set -x
+
+ORIG_PWD=$(pwd)
+
+if [ -n "${BASE_BRANCH:-}" ]; then
+    # shellcheck source=./lib/broker-build.sh
+    source "${LIB_DIR}/broker-build.sh"
+    create_and_switch_to_broker_build_dir "${BASE_BRANCH}" "${BUILD_DIR}"
+fi
+
+go mod vendor
+
+snapcraft pack "$@"
+
+# Check that there is exactly one snap file
+if [ "$(find . -maxdepth 1 -name '*.snap' | wc -l)" -ne 1 ]; then
+    echo "Error: Expected exactly one snap file, found multiple:"
+    find . -maxdepth 1 -name '*.snap'
+    exit 1
+fi
+
+# Move the snap file to the original directory
+SNAP_FILE=$(find . -maxdepth 1 -name '*.snap' | head -n 1)
+mv "${SNAP_FILE}" "${ORIG_PWD}/"
+
+# Use the snap name before the first underscore (drop version/arch) for squashfs root
+SNAP_BASENAME=$(basename "${SNAP_FILE}" .snap)
+SNAP_BASENAME=${SNAP_BASENAME%%_*}
+squashfs_root_dir="${ORIG_PWD}/${SNAP_BASENAME}-squashfs-root"
+
+# Remove any existing directory
+rm -rf "${squashfs_root_dir}"
+
+# Extract the snap file
+unsquashfs -d "${squashfs_root_dir}" "${ORIG_PWD}/${SNAP_FILE}"
