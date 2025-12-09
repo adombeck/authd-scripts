@@ -5,22 +5,49 @@ set -x
 
 go mod vendor
 
-if cargo metadata --no-deps --frozen --quiet >/dev/null 2>&1 && ! cargo fmt --check; then
-    set +x
-    echo >&2 "pre-push: Error: cargo fmt failed"
-    FAILED=1
+if cargo metadata --no-deps --frozen --quiet >/dev/null 2>&1; then
+    if ! cargo help fmt >/dev/null 2>&1; then
+        set +x
+        echo >&2 "pre-push: Warning: The installed cargo version does not support \`cargo fmt\`"
+        set -x
+    elif ! cargo fmt --check; then
+        set +x
+        echo >&2 "pre-push: Error: cargo fmt failed"
+        FAILED=1
+    fi
 fi
 
-if ! golangci-lint run; then
+
+run_golangci_lint() {
+	args=
+    if [ -d ./cmd/authd-oidc ]; then
+      args="--build-tags withmsentraid"
+    fi
+
+    # Check if the .golangci.yaml is v2
+    if grep -q 'version: "2"' .golangci.yaml; then
+        golangci-lint run $args
+    else
+        golangci-lint-v1 run $args
+    fi
+}
+
+if ! run_golangci_lint; then
     set +x
     echo >&2 "pre-push: Error: golangci-lint failed"
     FAILED=1
 fi
 
-# Check if the strings "DO-NOT-PUSH" or "XXX" are present in the diff with main
-if git diff main | grep -e DO-NOT-PUSH -e XXX | grep -v "mktemp"; then
+if [ -d ./cmd/authd-oidc ]; then
+    # Check if we can build both the msentraid and google brokers
+    go build -tags=withgoogle -o /dev/null ./cmd/authd-oidc
+    go build -tags=withmsentraid -o /dev/null ./cmd/authd-oidc
+fi
+
+# Check if the strings "DO-NOT-PUSH" are present in the diff with main
+if git diff main | grep -e DO-NOT-PUSH | grep -v "mktemp"; then
     set +x
-    echo >&2 "pre-push: Error: Found string DO-NOT-PUSH or XXX"
+    echo >&2 "pre-push: Error: Found string DO-NOT-PUSH"
     FAILED=1
 fi
 
