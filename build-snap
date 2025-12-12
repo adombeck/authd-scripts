@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-BUILD_DIR="../broker-snap-build-dir"
+BUILD_DIR="../build/broker-snap"
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 LIB_DIR="${SCRIPT_DIR}/lib"
 

@@ -32,6 +32,7 @@ create_and_switch_to_broker_build_dir() {
 
     if [ ! -d "${BUILD_DIR}" ]; then
         # Clone the build directory if it doesn't exist
+        mkdir -p "$(dirname "${BUILD_DIR}")"
         git clone --recurse-submodules "$(pwd)" "${BUILD_DIR}"
         git -C "${BUILD_DIR}/${LIBHIMMELBLAU_DIR}" remote set-url origin "${ORIG_DIR}/${LIBHIMMELBLAU_DIR}"
     fi
