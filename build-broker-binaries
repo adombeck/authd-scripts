@@ -63,7 +63,7 @@ if git grep -q authd-msentraid snap/snapcraft.yaml; then
 
     if [ -z "${SKIP_LIBHIMMELBLAU:-}" ]; then
         # Build the libhimmelblau binary and header
-        RELEASE=1 go generate ./internal/providers/msentraid/himmelblau/...
+        RELEASE=1 go generate --tags withmsentraid ./internal/providers/msentraid/himmelblau/...
         if [ -n "${BASE_BRANCH:-}" ]; then
             cp ./internal/providers/msentraid/himmelblau/himmelblau.h "${ORIG_DIR}"/internal/providers/msentraid/himmelblau.h
         fi
