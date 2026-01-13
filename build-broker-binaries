@@ -70,10 +70,7 @@ if git grep -q authd-msentraid snap/snapcraft.yaml; then
     fi
 elif git grep -q authd-google snap/snapcraft.yaml; then
     args="-tags=withgoogle -o authd-google"
-else
-    echo >&2 "Neither authd-msentraid nor authd-google found in snapcraft.yaml."
-    exit 1
 fi
 
 export GOFLAGS="-ldflags=-X=github.com/ubuntu/authd-oidc-brokers/internal/consts.Version=${VERSION}"
-go build -v ${args} ./cmd/authd-oidc
+go build -v ${args:-} ./cmd/authd-oidc
