@@ -39,7 +39,8 @@ if ! run_golangci_lint; then
 fi
 
 if [ -d ./cmd/authd-oidc ]; then
-    # Check if we can build both the msentraid and google brokers
+    # Check if we can build all the brokers
+    go build -o /dev/null ./cmd/authd-oidc
     go build -tags=withgoogle -o /dev/null ./cmd/authd-oidc
     go build -tags=withmsentraid -o /dev/null ./cmd/authd-oidc
 fi
