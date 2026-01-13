@@ -50,8 +50,10 @@ create_and_switch_to_broker_build_dir() {
         git checkout build
         git reset --hard "origin/${BASE_BRANCH}"
     fi
-    git cherry-pick --abort || true # Abort any previous cherry-pick operation
-    git cherry-pick --strategy-option=ours --empty=drop origin/main..origin/"${ORIG_BRANCH}"
+    if [ "${ORIG_BRANCH}" != "main" ]; then
+        git cherry-pick --abort || true # Abort any previous cherry-pick operation
+        git cherry-pick --strategy-option=ours --empty=drop origin/main..origin/"${ORIG_BRANCH}"
+    fi
     git submodule update
     # We need the main branch for the snap/version script
     git fetch origin main:main
