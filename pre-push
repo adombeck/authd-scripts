@@ -19,16 +19,11 @@ fi
 
 
 run_golangci_lint() {
-	args=
-    if [ -d ./cmd/authd-oidc ]; then
-      args="--build-tags withmsentraid"
-    fi
-
     # Check if the .golangci.yaml is v2
     if grep -q 'version: "2"' .golangci.yaml; then
-        golangci-lint run $args
+        golangci-lint run
     else
-        golangci-lint-v1 run $args
+        golangci-lint-v1 run
     fi
 }
 
@@ -38,11 +33,11 @@ if ! run_golangci_lint; then
     FAILED=1
 fi
 
-if [ -d ./cmd/authd-oidc ]; then
+if [ -d ./authd-oidc-brokers/cmd/authd-oidc ]; then
     # Check if we can build all the brokers
-    go build -o /dev/null ./cmd/authd-oidc
-    go build -tags=withgoogle -o /dev/null ./cmd/authd-oidc
-    go build -tags=withmsentraid -o /dev/null ./cmd/authd-oidc
+    go -C authd-oidc-brokers build -o /dev/null ./cmd/authd-oidc
+    go -C authd-oidc-brokers build -tags=withgoogle -o /dev/null ./cmd/authd-oidc
+    go -C authd-oidc-brokers build -tags=withmsentraid -o /dev/null ./cmd/authd-oidc
 fi
 
 if [ -d internal/services ]; then
