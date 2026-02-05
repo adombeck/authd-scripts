@@ -30,7 +30,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [ -n "${VERSION:=}" ]; then
-    export GOFLAGS="-ldflags=-X=github.com/ubuntu/authd/internal/consts.Version=${VERSION} --mod=vendor -buildmode=pie"
+    export GOFLAGS="-ldflags=-X=github.com/canonical/authd/internal/consts.Version=${VERSION} --mod=vendor -buildmode=pie"
 fi
 
 go mod vendor
