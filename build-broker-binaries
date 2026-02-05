@@ -15,6 +15,9 @@ Build the broker binary.
 
 Options:
   --version <version>  Version to set in the binary.
+  --msentraid          Build the msentraid broker binary.
+  --google             Build the google broker binary.
+  --oidc               Build the oidc broker binary.
   --base-branch <branch> Automatically check out a build branch based on the specified branch with
                          the commits that are not in the main branch cherry-picked.
   -h, --help           Show this help message and exit.
@@ -27,6 +30,18 @@ while [[ $# -gt 0 ]]; do
         --version)
             VERSION="$2"
             shift 2
+            ;;
+        --msentraid)
+            BROKER="msentraid"
+            shift
+            ;;
+        --google)
+            BROKER="google"
+            shift
+            ;;
+        --oidc)
+            BROKER="oidc"
+            shift
             ;;
         --base-branch)
             BASE_BRANCH="$2"
@@ -45,32 +60,32 @@ done
 
 if [ -z "${VERSION:-}" ]; then
     # Build the semver tool
-    go -C tools build -o semver ./semver
+    go -C authd-oidc-brokers/tools build -o semver ./semver
     # Get the version
-    VERSION=$(SEMVER=tools/semver/semver ./snap/version)
+    VERSION=$(SEMVER=authd-oidc-brokers/tools/semver/semver ./snap/version)
 fi
 
-if [ -n "${BASE_BRANCH:-}" ]; then
-    # shellcheck source=./lib/broker-build.sh
-    source "${LIB_DIR}/broker-build.sh"
-    create_and_switch_to_broker_build_dir "${BASE_BRANCH}" "${BUILD_DIR}"
+ORIG_PWD=$(pwd)
+
+if [ -n "${BROKER:-}" ]; then
+    SQUASHFS_ROOT_DIR="${ORIG_PWD}/authd-${BROKER}-squashfs-root"
 fi
 
 go mod vendor
 
-if git grep -q authd-msentraid snap/snapcraft.yaml; then
-    args="-tags=withmsentraid -o authd-msentraid"
+./scripts/prepare-broker-variant-files --broker "${BROKER:-oidc}"
 
-    if [ -z "${SKIP_LIBHIMMELBLAU:-}" ]; then
-        # Build the libhimmelblau binary and header
-        RELEASE=1 go generate --tags withmsentraid ./internal/providers/msentraid/himmelblau/...
-        if [ -n "${BASE_BRANCH:-}" ]; then
-            cp ./internal/providers/msentraid/himmelblau/himmelblau.h "${ORIG_DIR}"/internal/providers/msentraid/himmelblau.h
-        fi
-    fi
-elif git grep -q authd-google snap/snapcraft.yaml; then
-    args="-tags=withgoogle -o authd-google"
+if [ "${BROKER:-}" = "msentraid" ] && [ -z "${SKIP_LIBHIMMELBLAU:-}" ]; then
+    # Build the libhimmelblau binary and header
+    RELEASE=1 go generate --tags withmsentraid ./internal/providers/msentraid/himmelblau/...
 fi
 
-export GOFLAGS="-ldflags=-X=github.com/ubuntu/authd-oidc-brokers/internal/consts.Version=${VERSION}"
-go build -v ${args:-} ./cmd/authd-oidc
+export GOFLAGS="-ldflags=-X=github.com/canonical/authd/authd-oidc-brokers/internal/consts.Version=${VERSION}"
+go -C authd-oidc-brokers build -v ${args:-} ./cmd/authd-oidc
+
+if [ -d "${SQUASHFS_ROOT_DIR}" ]; then
+    mv "authd-oidc-brokers/authd-${BROKER}" "${SQUASHFS_ROOT_DIR}/bin/"
+else
+    set +x
+    echo >&2 "Squashfs root directory ${SQUASHFS_ROOT_DIR} does not exist"
+fi
