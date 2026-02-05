@@ -9,5 +9,8 @@ journalctl \
     _SYSTEMD_UNIT=snap.authd-google.authd-google.service \+ \
     UNIT=snap.authd-google.authd-google.service \+ \
     SYSLOG_IDENTIFIER=authd-google \+ \
+    _SYSTEMD_UNIT=snap.authd-oidc.authd-oidc.service \+ \
+    UNIT=snap.authd-oidc.authd-oidc.service \+ \
+    SYSLOG_IDENTIFIER=authd-oidc \+ \
     _COMM=authd-pam \
     "$@"
