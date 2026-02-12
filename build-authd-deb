@@ -1,0 +1,112 @@
+#!/bin/bash
+
+set -euo pipefail
+
+usage(){
+    cat << EOF
+    Usage: $0 [--build-dir] [--no-lintian] [--only-source] [--only-binary] [--release <release>]
+
+Build the authd deb package.
+
+Options:
+  --build-dir <dir>  Directory to use for building the package. Defaults to ../build/authd.
+  --no-lintian  Don't run lintian on the source and binary packages.
+  --only-source  Only build the source package, don't build the binary package in sbuild.
+EOF
+}
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --build-dir)
+            BUILD_DIR="$2"
+            shift 2
+            ;;
+        --no-lintian)
+            NO_LINTIAN=1
+            shift
+            ;;
+        --only-source)
+            ONLY_SOURCE=1
+            shift
+            ;;
+        --only-binary)
+            ONLY_BINARY=1
+            shift
+            ;;
+        --release)
+            RELEASE="$2"
+            shift 2
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1"
+            usage
+            exit 1
+            ;;
+    esac
+done
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+BUILD_DIR=${BUILD_DIR:-"../build/authd/"}
+RELEASE=${RELEASE:-"noble"}
+
+set -x
+
+if [ -n "${NO_LINTIAN:-}" ]; then
+    DEBUILD_ARGS="--no-lintian"
+    SBUILD_ARGS="--no-run-lintian"
+fi
+
+if ! dpkg --status rustc dh-cargo >/dev/null; then
+    sudo apt install rustc dh-cargo
+fi
+
+# Create the build directory
+"${SCRIPT_DIR}/create-build-dir" --build-dir "${BUILD_DIR}"
+cd "${BUILD_DIR}"
+
+if [ -z "${ONLY_BINARY:-}" ]; then
+    rm -rf vendor_rust
+    cargo vendor-filterer vendor_rust
+
+    # Build the source package
+    env \
+      DEB_BUILD_OPTIONS=nocheck \
+      DEBUILD_LINTIAN_OPTS="--pedantic --fail-on error,warning,info,pedantic" \
+      debuild ${DEBUILD_ARGS:-} \
+        -d \
+        --prepend-path="${HOME}/.cargo/bin" \
+        --prepend-path=/usr/local/bin \
+        -S \
+        --unsigned-source \
+        --unsigned-changes
+fi
+
+if [ -n "${ONLY_SOURCE:-}" ]; then
+    exit 0
+fi
+
+CHROOT_TARBALL="$HOME/.cache/sbuild/${RELEASE}-amd64.tar.zst"
+if ! [ -f "$CHROOT_TARBALL" ]; then
+    # Create the sbuild chroot tarball if it doesn't exist
+    mmdebstrap --variant=buildd --arch=amd64 \
+        --components=main,universe \
+        --include=software-properties-common \
+        --customize-hook='chroot "$1" add-apt-repository -y ppa:ubuntu-enterprise-desktop/golang' \
+        ${RELEASE} \
+        "$CHROOT_TARBALL"
+fi
+
+# Build the amd64 binary package in sbuild
+env \
+    DEB_BUILD_OPTIONS=nocheck \
+    sbuild ${SBUILD_ARGS:-} -A -v \
+        --build-dep-resolver=aptitude \
+        --chroot-mode=unshare \
+        --chroot="source:${CHROOT_TARBALL}" \
+        --enable-network \
+        "$(ls -t1 ../*.dsc | head -n1)"

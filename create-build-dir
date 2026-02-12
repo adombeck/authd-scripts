@@ -1,0 +1,53 @@
+#!/bin/bash
+
+set -euo pipefail
+
+usage() {
+    cat << EOF
+Usage: $0 [--build-dir <dir>]
+
+Clone the current git repository to a directory, apply uncommitted changes,
+and execute a command in that directory.
+
+Options:
+  -d, --build-dir DIR  Path to the build directory (default: ../build/<repo>)
+  -h, --help           Show this help message
+EOF
+}
+
+# Parse options
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -d|--build-dir)
+            BUILD_DIR="$2"
+            shift 2
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1"
+            usage
+            exit 1
+            ;;
+    esac
+done
+
+GIT_ROOT_DIR=$(git rev-parse --show-toplevel)
+BUILD_DIR="../build/$(basename "${GIT_ROOT_DIR}")"
+
+# Export uncommitted changes from main repo
+git diff > /tmp/uncommitted.patch
+git diff --staged >> /tmp/uncommitted.patch
+
+# Clone the directory
+rm -rf "${BUILD_DIR}"
+mkdir -p "$(dirname "${BUILD_DIR}")"
+git clone "${GIT_ROOT_DIR}" "${BUILD_DIR}"
+cd "${BUILD_DIR}"
+
+# Apply uncommitted changes from the main repo
+if [ -s /tmp/uncommitted.patch ]; then
+    git apply /tmp/uncommitted.patch
+fi
