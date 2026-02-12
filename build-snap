@@ -7,14 +7,16 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 LIB_DIR="${SCRIPT_DIR}/lib"
 
 usage() {
-    echo "Usage: $0 --broker <broker> [snapcraft options]"
-    echo
-    echo "Build the broker snap."
-    echo
-    echo "Options:"
-    echo "  --broker <broker>  The broker to use (msentraid or google)."
-    echo
-    echo "All other options are passed to snapcraft."
+        cat << EOF
+Usage: $0 --broker <broker> [snapcraft options]
+
+Build the broker snap.
+
+Options:
+  --broker <broker>  The broker to use (oidc, msentraid or google).
+
+All other options are passed to snapcraft.
+EOF
 }
 
 while [[ $# -gt 0 ]]; do
