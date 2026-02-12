@@ -39,7 +39,7 @@ set -x
 
 go mod vendor
 
-./scripts/prepare-broker-variant-files --broker "${BROKER:-oidc}"
+./snap/scripts/prepare-variant --broker "${BROKER:-oidc}"
 
 time snapcraft pack "$@"
 
