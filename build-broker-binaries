@@ -1,11 +1,6 @@
 #!/bin/bash
 
 set -eu
-set -x
-
-BUILD_DIR="../build/broker"
-SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-LIB_DIR="${SCRIPT_DIR}/lib"
 
 usage(){
     cat << EOF
@@ -15,11 +10,7 @@ Build the broker binary.
 
 Options:
   --version <version>  Version to set in the binary.
-  --msentraid          Build the msentraid broker binary.
-  --google             Build the google broker binary.
-  --oidc               Build the oidc broker binary.
-  --base-branch <branch> Automatically check out a build branch based on the specified branch with
-                         the commits that are not in the main branch cherry-picked.
+  --broker <broker>  The broker to use (oidc, msentraid or google).
   -h, --help           Show this help message and exit.
 EOF
 }
@@ -31,25 +22,17 @@ while [[ $# -gt 0 ]]; do
             VERSION="$2"
             shift 2
             ;;
-        --msentraid)
-            BROKER="msentraid"
-            shift
-            ;;
-        --google)
-            BROKER="google"
-            shift
-            ;;
-        --oidc)
-            BROKER="oidc"
-            shift
-            ;;
-        --base-branch)
-            BASE_BRANCH="$2"
+        --broker)
+            BROKER="$2"
             shift 2
             ;;
         --skip-libhimmelblau)
             SKIP_LIBHIMMELBLAU=1
             shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
             ;;
         *)
             echo "Unknown option: $1"
@@ -58,11 +41,13 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+set -x
+
 if [ -z "${VERSION:-}" ]; then
     # Build the semver tool
     go -C authd-oidc-brokers/tools build -o semver ./semver
     # Get the version
-    VERSION=$(SEMVER=authd-oidc-brokers/tools/semver/semver ./snap/version)
+    VERSION=$(SEMVER=authd-oidc-brokers/tools/semver/semver ./snap/scripts/version)
 fi
 
 ORIG_PWD=$(pwd)
@@ -73,15 +58,21 @@ fi
 
 go mod vendor
 
-./scripts/prepare-broker-variant-files --broker "${BROKER:-oidc}"
+./snap/scripts/prepare-variant --broker "${BROKER:-oidc}"
 
 if [ "${BROKER:-}" = "msentraid" ] && [ -z "${SKIP_LIBHIMMELBLAU:-}" ]; then
     # Build the libhimmelblau binary and header
-    RELEASE=1 go generate --tags withmsentraid ./internal/providers/msentraid/himmelblau/...
+    RELEASE=1 go -C authd-oidc-brokers generate --tags withmsentraid ./internal/providers/msentraid/himmelblau/...
+fi
+
+if [ "${BROKER:-}" != "oidc" ]; then
+    export GOFLAGS="--tags=with${BROKER}"
+    args="--tags=with${BROKER}"
 fi
 
 export GOFLAGS="-ldflags=-X=github.com/canonical/authd/authd-oidc-brokers/internal/consts.Version=${VERSION}"
-go -C authd-oidc-brokers build -v ${args:-} ./cmd/authd-oidc
+
+go -C authd-oidc-brokers build -v -o "authd-${BROKER}" ${args:-} ./cmd/authd-oidc
 
 if [ -d "${SQUASHFS_ROOT_DIR}" ]; then
     mv "authd-oidc-brokers/authd-${BROKER}" "${SQUASHFS_ROOT_DIR}/bin/"
