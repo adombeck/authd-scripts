@@ -1,4 +1,26 @@
-#!/bin/sh
+#!/bin/bash
+
+set -euo pipefail
+
+usage(){
+    cat << EOF
+Usage: $0 [journalctl options]
+
+Show the logs for authd and authd broker snaps. All options are passed to journalctl.
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
 
 journalctl \
     _SYSTEMD_UNIT=authd.service \+ \
