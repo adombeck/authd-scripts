@@ -88,9 +88,6 @@ fi
 cd "${BUILD_DIR}"
 
 if [ -z "${ONLY_BINARY:-}" ]; then
-    rm -rf vendor_rust
-    cargo vendor-filterer vendor_rust
-
     # Build the source package
     # shellcheck disable=SC2086 # Allow word splitting for DEBUILD_ARGS
     env \
