@@ -16,13 +16,16 @@ Options:
       Directory to use for building the package. Defaults to ../build/authd.
 
   --no-lintian
-      Don't run lintian on the source and binary packages.
+      Don't run lintian on the source and binary packages. Speeds up the build,
+      but the resulting package won't be checked for issues.
 
   --only-source
       Only build the source package, don't build the binary package in sbuild.
 
   --only-binary
       Only build the binary package in sbuild, don't build the source package.
+      Requires that the source package is already built and available in the
+      parent directory of the build directory.
 
   --dist <distribution>
       The target distribution to build the package for (default: noble).
