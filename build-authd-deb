@@ -92,6 +92,7 @@ if [ -z "${ONLY_BINARY:-}" ]; then
     cargo vendor-filterer vendor_rust
 
     # Build the source package
+    # shellcheck disable=SC2086 # Allow word splitting for DEBUILD_ARGS
     env \
       DEB_BUILD_OPTIONS=nocheck \
       DEBUILD_LINTIAN_OPTS="--pedantic --fail-on error,warning,info,pedantic" \
@@ -111,15 +112,18 @@ fi
 CHROOT_TARBALL="$HOME/.cache/sbuild/${DIST}-amd64.tar.zst"
 if ! [ -f "$CHROOT_TARBALL" ]; then
     # Create the sbuild chroot tarball if it doesn't exist
+    # shellcheck disable=SC2016 # We don't want the expression in --customize-hook to be expanded
     mmdebstrap --variant=buildd --arch=amd64 \
         --components=main,universe \
         --include=software-properties-common \
         --customize-hook='chroot "$1" add-apt-repository -y ppa:ubuntu-enterprise-desktop/golang' \
-        ${DIST} \
+        "${DIST}" \
         "$CHROOT_TARBALL"
 fi
 
 # Build the amd64 binary package in sbuild
+# shellcheck disable=SC2086 # Allow word splitting for SBUILD_ARGS
+# shellcheck disable=SC2012 # The .dsc file doesn't contain non-alphanumeric characters
 env \
     DEB_BUILD_OPTIONS=nocheck \
     sbuild ${SBUILD_ARGS:-} -A -v \

@@ -41,7 +41,8 @@ go mod vendor
 
 time snapcraft pack "$@"
 
-SNAP_FILE=$(ls -t *.snap | head -n1)
+# shellcheck disable=SC2012 # The .snap file doesn't contain non-alphanumeric characters
+SNAP_FILE=$(ls -t ./*.snap | head -n1)
 
 # Use the snap name before the first underscore (drop version/arch) for squashfs root
 SNAP_BASENAME=$(basename "${SNAP_FILE}" .snap)

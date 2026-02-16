@@ -97,6 +97,7 @@ fi
 
 export GOFLAGS="-ldflags=-X=github.com/canonical/authd/authd-oidc-brokers/internal/consts.Version=${VERSION}"
 
+# shellcheck disable=SC2086 # Allow word splitting for args
 go -C authd-oidc-brokers build -v -o "authd-${BROKER}" ${args:-} ./cmd/authd-oidc
 
 if [ -d "${SQUASHFS_ROOT_DIR}" ]; then
