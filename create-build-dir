@@ -38,6 +38,8 @@ done
 GIT_ROOT_DIR=$(git rev-parse --show-toplevel)
 BUILD_DIR="../build/$(basename "${GIT_ROOT_DIR}")"
 
+set -x
+
 # Export uncommitted changes from main repo
 git diff > /tmp/uncommitted.patch
 git diff --staged >> /tmp/uncommitted.patch
