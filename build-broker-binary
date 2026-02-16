@@ -14,12 +14,15 @@ directory (see build-broker-snap), the squashfs root directory can be installed
 via 'sudo snap try <squashfs-root-dir>'.
 
 Options:
-  --version <version>
-      Version to set in the binary. If not set, a version is generated with the
-      snap/scripts/version script.
   --broker <broker>
       The broker to use. Valid values are 'oidc', 'msentraid' and 'google'.
       This option is required.
+  --version <version>
+      Version to set in the binary. If not set, a version is generated with the
+      snap/scripts/version script.
+  --build-dir <dir>
+    Directory containing the squashfs root directory to place the built binary in.
+    Defaults to ../build.
   --skip-libhimmelblau
       When building the msentraid broker, by default libhimmelblau is also built
       and copied to the squashfs root directory.
@@ -61,6 +64,9 @@ if [ -z "${BROKER:-}" ]; then
     exit 1
 fi
 
+BUILD_DIR=${BUILD_DIR:-"../build"}
+SQUASHFS_ROOT_DIR=${SQUASHFS_ROOT_DIR:-"${BUILD_DIR}/authd-${BROKER}-squashfs-root"}
+
 set -x
 
 if [ -z "${VERSION:-}" ]; then
@@ -68,12 +74,6 @@ if [ -z "${VERSION:-}" ]; then
     go -C authd-oidc-brokers/tools build -o semver ./semver
     # Get the version
     VERSION=$(SEMVER=authd-oidc-brokers/tools/semver/semver ./snap/scripts/version)
-fi
-
-ORIG_PWD=$(pwd)
-
-if [ -n "${BROKER:-}" ]; then
-    SQUASHFS_ROOT_DIR="${ORIG_PWD}/authd-${BROKER}-squashfs-root"
 fi
 
 go mod vendor
