@@ -124,4 +124,5 @@ env \
         --chroot-mode=unshare \
         --chroot="source:${CHROOT_TARBALL}" \
         --enable-network \
+        --lintian-opts="--pedantic --fail-on error,warning,info,pedantic" \
         "$(ls -t1 ../*.dsc | head -n1)"
