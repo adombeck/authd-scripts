@@ -4,14 +4,28 @@ set -euo pipefail
 
 usage(){
     cat << EOF
-Usage: $0 [--version <version>] [-h|--help]
+Usage: $0 --broker <broker> [options]
 
-Build the broker binary.
+Build the broker binary and place it in the squashfs root directory if it exists.
+
+This is useful for building the broker binary for the snap without having to
+build the entire snap. If the snap was previously extracted into a squashfs root
+directory (see build-broker-snap), the squashfs root directory can be installed
+via 'sudo snap try <squashfs-root-dir>'.
 
 Options:
-  --version <version>  Version to set in the binary.
-  --broker <broker>  The broker to use (oidc, msentraid or google).
-  -h, --help           Show this help message and exit.
+  --version <version>
+      Version to set in the binary. If not set, a version is generated with the
+      snap/scripts/version script.
+  --broker <broker>
+      The broker to use. Valid values are 'oidc', 'msentraid' and 'google'.
+      This option is required.
+  --skip-libhimmelblau
+      When building the msentraid broker, by default libhimmelblau is also built
+      and copied to the squashfs root directory.
+      This option can be used to skip building libhimmelblau.
+  -h, --help
+      Show this help message and exit.
 EOF
 }
 
@@ -41,6 +55,12 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+if [ -z "${BROKER:-}" ]; then
+    echo >&2 "Error: --broker option is required"
+    usage
+    exit 1
+fi
+
 set -x
 
 if [ -z "${VERSION:-}" ]; then
@@ -58,10 +78,15 @@ fi
 
 go mod vendor
 
-./snap/scripts/prepare-variant --broker "${BROKER:-oidc}"
+./snap/scripts/prepare-variant --broker "${BROKER}"
 
 if [ "${BROKER:-}" = "msentraid" ] && [ -z "${SKIP_LIBHIMMELBLAU:-}" ]; then
-    # Build the libhimmelblau binary and header
+    if ! command -v rustup &> /dev/null; then
+        echo "rustup is required to build libhimmelblau, installing it now..."
+        sudo apt install rustup
+    fi
+
+    # Build the libhimmelblau library and header
     RELEASE=1 go -C authd-oidc-brokers generate --tags withmsentraid ./internal/providers/msentraid/himmelblau/...
 fi
 
@@ -75,7 +100,14 @@ export GOFLAGS="-ldflags=-X=github.com/canonical/authd/authd-oidc-brokers/intern
 go -C authd-oidc-brokers build -v -o "authd-${BROKER}" ${args:-} ./cmd/authd-oidc
 
 if [ -d "${SQUASHFS_ROOT_DIR}" ]; then
+    # Move the broker binary to the squashfs root directory
     mv "authd-oidc-brokers/authd-${BROKER}" "${SQUASHFS_ROOT_DIR}/bin/"
+
+    if [ "${BROKER:-}" = "msentraid" ] && [ -z "${SKIP_LIBHIMMELBLAU:-}" ]; then
+        # Copy the libhimmelblau library to the squashfs root directory.
+        install -D "./authd-oidc-brokers/internal/providers/msentraid/himmelblau/libhimmelblau.so.0" \
+          "${SQUASHFS_ROOT_DIR}/lib/libhimmelblau.so.0"
+    fi
 else
     set +x
     echo >&2 "Squashfs root directory ${SQUASHFS_ROOT_DIR} does not exist"
