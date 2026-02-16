@@ -50,4 +50,4 @@ echo "XS-Vendored-Sources-Rust is out of date. Updating it now."
 sed -i "s/^XS-Vendored-Sources-Rust:.*/$OUTPUT/" debian/control
 
 git add debian/control
-git commit -m "debian/control: Update XS-Vendored-Sources-Rust"
+git commit -m "debian/control: Update XS-Vendored-Sources-Rust" debian/control
