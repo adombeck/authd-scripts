@@ -6,12 +6,13 @@ usage() {
     cat << EOF
 Usage: $0 [--build-dir <dir>]
 
-Clone the current git repository to a directory, apply uncommitted changes,
-and execute a command in that directory.
+Clone the current git repository to a directory and apply uncommitted changes.
+This is useful for building the package in a clean environment without files that
+are not tracked by git, while still including uncommitted changes in the build.
 
 Options:
-  -d, --build-dir DIR  Path to the build directory (default: ../build/<repo>)
-  -h, --help           Show this help message
+  -d, --build-dir <dir>  Path to the build directory (default: ../build/<repo>)
+  -h, --help             Show this help message
 EOF
 }
 

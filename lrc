@@ -4,15 +4,26 @@ set -euo pipefail
 
 usage(){
     cat << EOF
-    Usage: $0 [--build-dir] [--skip-build] [--no-lintian] [--dist <distribution>]
+Usage: $0 [options]
 
-Build the authd source deb, extract it and run lrc on it.
+Build the authd source deb, extract it and run licenserecon on it.
 
 Options:
-  --build-dir <dir>  Directory to use for building the package and extracting the source package. Defaults to ../build/authd.
-  --skip-build  Skip building the source package and just run lrc on the existing source package in the build directory.
-  --no-lintian  Don't run lintian when building the source package. Ignored if --skip-build is used.
-  --dist <distribution>  The target distribution to build the package for (default: noble). Ignored if --skip-build is used.
+  --build-dir <dir>
+      Directory to use for building the package and extracting the source package.
+      Defaults to ../build/authd.
+
+  --skip-build
+      Skip building the source package and just run lrc on the existing source
+      package in the build directory.
+
+  --no-lintian
+      Don't run lintian when building the source package.
+      Ignored if --skip-build is used.
+
+  --dist <distribution>
+      The target distribution to build the package for (default: noble).
+      Ignored if --skip-build is used.
 EOF
 }
 

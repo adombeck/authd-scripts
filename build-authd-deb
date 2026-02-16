@@ -4,16 +4,28 @@ set -euo pipefail
 
 usage(){
     cat << EOF
-    Usage: $0 [--build-dir] [--no-lintian] [--only-source] [--only-binary] [--dist <distribution>]
+Usage: $0 [options]
 
-Build the authd deb package.
+Build the authd source and binary deb packages. The build is done in a fresh
+clone of the repository in a separate build directory, so that files that are
+not tracked by git are not included in the package. Uncommitted changes in the
+repository are applied to the build directory
 
 Options:
-  --build-dir <dir>  Directory to use for building the package. Defaults to ../build/authd.
-  --no-lintian  Don't run lintian on the source and binary packages.
-  --only-source  Only build the source package, don't build the binary package in sbuild.
-  --only-binary  Only build the binary package in sbuild, don't build the source package.
-  --dist <distribution>  The target distribution to build the package for (default: noble).
+  --build-dir <dir>
+      Directory to use for building the package. Defaults to ../build/authd.
+
+  --no-lintian
+      Don't run lintian on the source and binary packages.
+
+  --only-source
+      Only build the source package, don't build the binary package in sbuild.
+
+  --only-binary
+      Only build the binary package in sbuild, don't build the source package.
+
+  --dist <distribution>
+      The target distribution to build the package for (default: noble).
 EOF
 }
 
