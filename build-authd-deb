@@ -4,7 +4,7 @@ set -euo pipefail
 
 usage(){
     cat << EOF
-    Usage: $0 [--build-dir] [--no-lintian] [--only-source] [--only-binary] [--release <release>]
+    Usage: $0 [--build-dir] [--no-lintian] [--only-source] [--only-binary] [--dist <distribution>]
 
 Build the authd deb package.
 
@@ -12,6 +12,8 @@ Options:
   --build-dir <dir>  Directory to use for building the package. Defaults to ../build/authd.
   --no-lintian  Don't run lintian on the source and binary packages.
   --only-source  Only build the source package, don't build the binary package in sbuild.
+  --only-binary  Only build the binary package in sbuild, don't build the source package.
+  --dist <distribution>  The target distribution to build the package for (default: noble).
 EOF
 }
 
@@ -34,8 +36,8 @@ while [[ $# -gt 0 ]]; do
             ONLY_BINARY=1
             shift
             ;;
-        --release)
-            RELEASE="$2"
+        --dist)
+            DIST="$2"
             shift 2
             ;;
         -h|--help)
@@ -52,7 +54,7 @@ done
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 BUILD_DIR=${BUILD_DIR:-"../build/authd/"}
-RELEASE=${RELEASE:-"noble"}
+DIST=${DIST:-"noble"}
 
 set -x
 
@@ -90,14 +92,14 @@ if [ -n "${ONLY_SOURCE:-}" ]; then
     exit 0
 fi
 
-CHROOT_TARBALL="$HOME/.cache/sbuild/${RELEASE}-amd64.tar.zst"
+CHROOT_TARBALL="$HOME/.cache/sbuild/${DIST}-amd64.tar.zst"
 if ! [ -f "$CHROOT_TARBALL" ]; then
     # Create the sbuild chroot tarball if it doesn't exist
     mmdebstrap --variant=buildd --arch=amd64 \
         --components=main,universe \
         --include=software-properties-common \
         --customize-hook='chroot "$1" add-apt-repository -y ppa:ubuntu-enterprise-desktop/golang' \
-        ${RELEASE} \
+        ${DIST} \
         "$CHROOT_TARBALL"
 fi
 
@@ -106,6 +108,7 @@ env \
     DEB_BUILD_OPTIONS=nocheck \
     sbuild ${SBUILD_ARGS:-} -A -v \
         --build-dep-resolver=aptitude \
+        --dist="${DIST}" \
         --chroot-mode=unshare \
         --chroot="source:${CHROOT_TARBALL}" \
         --enable-network \

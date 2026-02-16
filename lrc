@@ -4,15 +4,15 @@ set -euo pipefail
 
 usage(){
     cat << EOF
-    Usage: $0 [--build-dir] [--skip-build] [--no-lintian] [--release <release>]
+    Usage: $0 [--build-dir] [--skip-build] [--no-lintian] [--dist <distribution>]
 
 Build the authd source deb, extract it and run lrc on it.
 
 Options:
-  --build-dir <dir>  Directory to use for building the package. Defaults to ../build/authd.
+  --build-dir <dir>  Directory to use for building the package and extracting the source package. Defaults to ../build/authd.
   --skip-build  Skip building the source package and just run lrc on the existing source package in the build directory.
-  --no-lintian  Don't run lintian when building the source package.
-  --release <release>  The Ubuntu release to use for the sbuild chroot (default: noble).
+  --no-lintian  Don't run lintian when building the source package. Ignored if --skip-build is used.
+  --dist <distribution>  The target distribution to build the package for (default: noble). Ignored if --skip-build is used.
 EOF
 }
 
@@ -31,8 +31,8 @@ while [[ $# -gt 0 ]]; do
             NO_LINTIAN=1
             shift
             ;;
-        --release)
-            RELEASE="$2"
+        --dist)
+            DIST="$2"
             shift 2
             ;;
         -h|--help)
@@ -49,7 +49,7 @@ done
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 BUILD_DIR=${BUILD_DIR:-"../build/authd/"}
-RELEASE=${RELEASE:-"noble"}
+DIST=${DIST:-"noble"}
 
 set -x
 
@@ -59,7 +59,7 @@ if [ -z "${SKIP_BUILD:-}" ]; then
       --build-dir "${BUILD_DIR}" \
       ${NO_LINTIAN:+--no-lintian} \
       --only-source \
-      --release "${RELEASE}"
+      --dist "${DIST}"
 fi
 
 # Extract the source package
