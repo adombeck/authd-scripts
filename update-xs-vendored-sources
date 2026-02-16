@@ -1,6 +1,32 @@
-#!/bin/sh
+#!/bin/bash
 
-set -eu
+set -euo pipefail
+
+usage(){
+    cat << EOF
+Usage: $0
+
+Update the XS-Vendored-Sources-Rust field in debian/control and commit the
+change if the vendored sources have changed.
+
+This should be run after updating any Rust dependencies.
+EOF
+}
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1"
+            usage
+            exit 1
+            ;;
+    esac
+done
 
 rm -rf vendor_rust || true
 cargo vendor-filterer vendor_rust
