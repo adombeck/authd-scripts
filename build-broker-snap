@@ -6,7 +6,8 @@ usage() {
         cat << EOF
 Usage: $0 --broker <broker> [snapcraft options]
 
-Build the broker snap.
+Build the broker snap. The snap is extracted into a squashfs root directory
+after building, which can be installed via 'sudo snap try <squashfs-root-dir>'.
 
 Options:
   --broker <broker>  The broker to use (oidc, msentraid or google).
