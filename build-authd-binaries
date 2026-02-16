@@ -8,6 +8,10 @@ Usage: $0 [--version <version>] [-h|--help]
 
 Build the authd binaries.
 
+Important: Don't trust the PAM module binary built by this script, it behaves
+differently from the one built by the deb package. If you encounter any issues
+with the PAM module, build and install the deb package instead.
+
 Options:
   --version <version>  Version to set in the binary.
   -h, --help           Show this help message and exit.
