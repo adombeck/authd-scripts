@@ -92,14 +92,14 @@ if [ -z "${ONLY_BINARY:-}" ]; then
     # shellcheck disable=SC2086 # Allow word splitting for DEBUILD_ARGS
     env \
       DEB_BUILD_OPTIONS=nocheck \
-      DEBUILD_LINTIAN_OPTS="--pedantic --fail-on error,warning,info,pedantic" \
       debuild ${DEBUILD_ARGS:-} \
         -d \
         --prepend-path="${HOME}/.cargo/bin" \
         --prepend-path=/usr/local/bin \
         -S \
         --unsigned-source \
-        --unsigned-changes
+        --unsigned-changes \
+        --lintian-opts --pedantic --fail-on error,warning,info,pedantic
 fi
 
 if [ -n "${ONLY_SOURCE:-}" ]; then
