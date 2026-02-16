@@ -78,8 +78,9 @@ if [ -n "${NO_LINTIAN:-}" ]; then
     SBUILD_ARGS="--no-run-lintian"
 fi
 
-if ! dpkg --status rustc dh-cargo >/dev/null; then
-    sudo apt install rustc dh-cargo
+if ! dpkg --status dh-cargo >/dev/null; then
+    echo "dh-cargo is not installed, installing it now..."
+    sudo apt install dh-cargo
 fi
 
 # Create the build directory
