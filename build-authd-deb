@@ -74,7 +74,6 @@ DIST=${DIST:-"noble"}
 set -x
 
 if [ -n "${NO_LINTIAN:-}" ]; then
-    DEBUILD_ARGS="--no-lintian"
     SBUILD_ARGS="--no-run-lintian"
 fi
 
@@ -89,17 +88,25 @@ cd "${BUILD_DIR}"
 
 if [ -z "${ONLY_BINARY:-}" ]; then
     # Build the source package
-    # shellcheck disable=SC2086 # Allow word splitting for DEBUILD_ARGS
     env \
       DEB_BUILD_OPTIONS=nocheck \
-      debuild ${DEBUILD_ARGS:-} \
+      debuild \
+        --no-lintian \
         -d \
         --prepend-path="${HOME}/.cargo/bin" \
         --prepend-path=/usr/local/bin \
         -S \
         --unsigned-source \
-        --unsigned-changes \
-        --lintian-opts --pedantic --fail-on error,warning,info,pedantic
+        --unsigned-changes
+
+    if [ -z "${NO_LINTIAN:-}" ]; then
+        # shellcheck disable=SC2012 # The .dsc file doesn't contain non-alphanumeric characters
+        DSC_FILE="$(ls -t1 ../*.dsc | head -n1)"
+        lintian --tag-display-limit 0 \
+                --pedantic \
+                --fail-on error,warning,info,pedantic \
+                "$DSC_FILE"
+    fi
 fi
 
 if [ -n "${ONLY_SOURCE:-}" ]; then
