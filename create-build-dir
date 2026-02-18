@@ -36,7 +36,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 GIT_ROOT_DIR=$(git rev-parse --show-toplevel)
-BUILD_DIR="../build/$(basename "${GIT_ROOT_DIR}")"
+BUILD_DIR=${BUILD_DIR:-../build/$(basename "${GIT_ROOT_DIR}")}
 
 set -x
 
