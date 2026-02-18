@@ -13,7 +13,9 @@ repository are applied to the build directory
 
 Options:
   --build-dir <dir>
-      Directory to use for building the package. Defaults to ../build/authd.
+      Directory to use for building the package. Defaults to ../build/<repo>.
+      The build artifacts are created in the parent directory of the build
+      directory, so in ../build/ by default.
 
   --no-lintian
       Don't run lintian on the source and binary packages. Speeds up the build,
@@ -68,7 +70,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-BUILD_DIR=${BUILD_DIR:-"../build/authd/"}
+GIT_ROOT_DIR=$(git rev-parse --show-toplevel)
+BUILD_DIR=${BUILD_DIR:-../build/$(basename "${GIT_ROOT_DIR}")}
 DIST=${DIST:-"noble"}
 
 set -x
