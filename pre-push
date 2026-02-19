@@ -35,9 +35,9 @@ fi
 
 if [ -d ./authd-oidc-brokers/cmd/authd-oidc ]; then
     # Check if we can build all the brokers
-    go -C authd-oidc-brokers build -o /dev/null ./cmd/authd-oidc
-    go -C authd-oidc-brokers build -tags=withgoogle -o /dev/null ./cmd/authd-oidc
-    go -C authd-oidc-brokers build -tags=withmsentraid -o /dev/null ./cmd/authd-oidc
+    go -C authd-oidc-brokers build -v -o /dev/null ./cmd/authd-oidc
+    go -C authd-oidc-brokers build -v -tags=withgoogle -o /dev/null ./cmd/authd-oidc
+    go -C authd-oidc-brokers build -v -tags=withmsentraid -o /dev/null ./cmd/authd-oidc
 fi
 
 if [ -d internal/services ]; then
