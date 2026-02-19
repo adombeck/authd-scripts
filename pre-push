@@ -44,7 +44,7 @@ if [ -d internal/services ]; then
     # Check if the golden files containing the registered gRPC services are up to date
     TESTS_UPDATE_GOLDEN=1 go test -C internal/services -run TestRegisterGRPCServices
     # Check if any files were modified
-    if [ -n "$(git status --porcelain)" ]; then
+    if [ -n "$(git status --porcelain internal/services)" ]; then
         set +x
         echo >&2 "pre-push: Error: internal/services: golden files were updated, please commit the changes"
         FAILED=1
