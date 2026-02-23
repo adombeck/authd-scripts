@@ -134,7 +134,7 @@ fi
 env \
     DEB_BUILD_OPTIONS=nocheck \
     sbuild ${SBUILD_ARGS:-} -A -v \
-        --build-dir="$(dirname "${BUILD_DIR}")" \
+        --build-dir="$(dirname "$(pwd)")" \
         --build-dep-resolver=aptitude \
         --dist="${DIST}" \
         --chroot-mode=unshare \
