@@ -6,8 +6,11 @@ usage() {
         cat << EOF
 Usage: $0 --broker <broker> [--build-dir <dir>] [snapcraft options]
 
-Build the broker snap. The snap is extracted into a squashfs root directory
-after building, which can be installed via 'sudo snap try <squashfs-root-dir>'.
+Builds the broker snap and extracts it into a squashfs root directory.
+You can install the extracted snap with:
+  sudo snap try <squashfs-root-dir>
+
+This script must be run from the root of the authd repository.
 
 Options:
   --broker <broker>
