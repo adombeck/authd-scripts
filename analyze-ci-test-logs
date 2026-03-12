@@ -1,0 +1,251 @@
+#!/usr/bin/env python3
+"""
+Analyzes downloaded authd go test logs and prints failure statistics.
+
+Expects the directory layout produced by download-authd-artifacts.sh:
+  <input>/run-<id>/<artifact-name>/gotestfmt*.log
+  <input>/run-<id>/<artifact-name>/meta.json
+"""
+
+import argparse
+import json
+import os
+import re
+import sys
+from collections import defaultdict
+from dataclasses import dataclass, field
+from pathlib import Path
+
+
+# ── Data types ─────────────────────────────────────────────────────────────────
+
+@dataclass
+class ErrorTrace:
+    lines: list[str]        # Error Trace: + continuation lines
+    error: list[str]        # Error: + continuation lines
+    test: str               # Test: value
+    messages: list[str]     # Messages: + continuation lines (may be empty)
+
+    def format(self, indent: str) -> str:
+        parts = self.lines + self.error + self.messages
+        return "\n".join(indent + l for l in parts)
+
+
+@dataclass
+class TestFailure:
+    name: str
+    traces: list[ErrorTrace] = field(default_factory=list)
+
+
+@dataclass
+class RunResult:
+    run_id: str
+    run_date: str
+    conclusion: str
+    failures: list[TestFailure]   # ordered as they appear in the log
+
+
+# ── Log parsing ────────────────────────────────────────────────────────────────
+
+def parse_error_traces(log_path: Path) -> dict[str, list[ErrorTrace]]:
+    """
+    Parse all Error Trace blocks from a log file.
+    Returns a dict mapping test name -> list of ErrorTrace (usually one per test,
+    but a test can have multiple assertions fail).
+    """
+    traces: dict[str, list[ErrorTrace]] = defaultdict(list)
+
+    # Field labels we track, in the order they appear in a block
+    TRACE_RE  = re.compile(r'\s+Error Trace:\s+(.*)')
+    CONT_RE   = re.compile(r'\s{16,}(\S.*)')   # continuation indent lines
+    ERROR_RE  = re.compile(r'\s+Error:\s+(.*)')
+    TEST_RE   = re.compile(r'\s+Test:\s+(.*)')
+    MSG_RE    = re.compile(r'\s+Messages:\s+(.*)')
+
+    INDENT = " "*12 + "\t"
+
+    lines = log_path.read_text(errors="replace").splitlines()
+    i = 0
+    while i < len(lines):
+        m = TRACE_RE.match(lines[i])
+        if not m:
+            i += 1
+            continue
+
+        # Start of a block
+        trace_lines = [lines[i].strip()]
+        error_lines: list[str] = []
+        test_name = ""
+        msg_lines: list[str] = []
+
+        i += 1
+        # Continuation lines for Error Trace (extra file:line entries)
+        while i < len(lines) and CONT_RE.match(lines[i]) and not re.match(r'\s+Error:', lines[i]):
+            trace_lines.append(INDENT + lines[i].strip())
+            i += 1
+
+        # Error:
+        if i < len(lines) and re.match(r'\s+Error:', lines[i]):
+            error_lines.append(lines[i].strip())
+            i += 1
+            while i < len(lines) and CONT_RE.match(lines[i]) and not re.match(r'\s+Test:', lines[i]):
+                error_lines.append(INDENT + lines[i].strip())
+                i += 1
+
+        # Test:
+        if i < len(lines) and (m2 := TEST_RE.match(lines[i])):
+            test_name = m2.group(1).strip()
+            i += 1
+
+        # Messages: (optional)
+        if i < len(lines) and re.match(r'\s+Messages:', lines[i]):
+            msg_lines.append(lines[i].strip())
+            i += 1
+            while i < len(lines) and CONT_RE.match(lines[i]) and not re.match(r'\s+Error Trace:', lines[i]):
+                msg_lines.append(INDENT + lines[i].strip())
+                i += 1
+
+        if test_name:
+            traces[test_name].append(ErrorTrace(
+                lines=trace_lines,
+                error=error_lines,
+                test=test_name,
+                messages=msg_lines,
+            ))
+
+    return traces
+
+
+def parse_log(log_path: Path) -> list[TestFailure]:
+    """
+    Extract ordered list of TestFailure from a gotestfmt log file.
+    Parent tests (no '/') that only aggregate subtests get no traces of their own.
+    """
+    error_traces = parse_error_traces(log_path)
+
+    failures: list[TestFailure] = []
+    seen: set[str] = set()
+
+    for line in log_path.read_text(errors="replace").splitlines():
+        if "❌" not in line:
+            continue
+        m = re.search(r"❌\s+(\S+.*?)\s+\(FAIL", line)
+        if not m:
+            continue
+        name = m.group(1).strip()
+        if name in seen:
+            continue
+        seen.add(name)
+        failures.append(TestFailure(name=name, traces=error_traces.get(name, [])))
+
+    return failures
+
+
+# ── Per-run analysis ───────────────────────────────────────────────────────────
+
+def analyze_run(run_dir: Path) -> RunResult | None:
+    """
+    Analyze all gotestfmt*.log files under a run directory.
+    Returns None if no log files found.
+    """
+    log_files = sorted(run_dir.rglob("gotestfmt*.log"))
+    if not log_files:
+        return None
+
+    meta_files = list(run_dir.rglob("meta.json"))
+    run_date = conclusion = ""
+    if meta_files:
+        try:
+            meta = json.loads(meta_files[0].read_text())
+            run_date = meta.get("run_date", "")
+            conclusion = meta.get("conclusion", "")
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    all_failures: list[TestFailure] = []
+    for log in log_files:
+        all_failures.extend(parse_log(log))
+
+    return RunResult(
+        run_id=run_dir.name,
+        run_date=run_date,
+        conclusion=conclusion,
+        failures=all_failures,
+    )
+
+
+# ── Formatting ─────────────────────────────────────────────────────────────────
+
+def print_run(result: RunResult, show_errors: bool) -> None:
+    if not result.failures:
+        print(f"✅ {result.run_id}  {result.run_date}  conclusion: {result.conclusion}  — no failures")
+        return
+
+    print(f"❌ {result.run_id}  {result.run_date}  conclusion: {result.conclusion}")
+    for failure in result.failures:
+        print(f"     ❌ {failure.name}")
+        if show_errors:
+            for trace in failure.traces:
+                print(trace.format(indent="\t"))
+                print()
+    print()
+
+
+# ── Entry point ────────────────────────────────────────────────────────────────
+
+def main() -> None:
+    default_input = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share")) / "authd-artifacts"
+
+    parser = argparse.ArgumentParser(
+        description="Analyze downloaded authd go test logs and print failure statistics.",
+    )
+    parser.add_argument("--input", type=Path, default=default_input,
+                        help=f"Directory containing downloaded artifacts (default: {default_input})")
+    parser.add_argument("--show-errors", action="store_true",
+                        help="Print error traces inline under each failing test")
+    args = parser.parse_args()
+
+    if not args.input.is_dir():
+        print(f"Input directory not found: {args.input}", file=sys.stderr)
+        sys.exit(1)
+
+    run_dirs = sorted(d for d in args.input.iterdir() if d.is_dir() and d.name.startswith("run-"))
+
+    if not run_dirs:
+        print(f"No run directories found in {args.input}")
+        sys.exit(0)
+
+    results = [r for d in run_dirs if (r := analyze_run(d)) is not None]
+
+    print(f"Analyzing {len(results)} run(s) in {args.input}\n")
+
+    total_runs = len(results)
+    runs_with_failures = 0
+    fail_counts: dict[str, int] = defaultdict(int)
+
+    for result in results:
+        print_run(result, show_errors=args.show_errors)
+        if result.failures:
+            runs_with_failures += 1
+            for f in result.failures:
+                fail_counts[f.name] += 1
+
+    print("════════════════════════════════════════════════════════")
+    print("Summary")
+    print("════════════════════════════════════════════════════════")
+    print(f"Total runs analyzed : {total_runs}")
+    print(f"Runs with failures  : {runs_with_failures}")
+    print(f"Runs clean          : {total_runs - runs_with_failures}")
+
+    if not fail_counts:
+        print("\nNo test failures found.")
+        return
+
+    print("\nFailure counts by test (across all runs):")
+    print("──────────────────────────────────────────")
+    for name, count in sorted(fail_counts.items(), key=lambda x: -x[1]):
+        print(f"  {count:3d}  {name}")
+
+
+if __name__ == "__main__":
+    main()
