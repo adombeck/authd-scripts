@@ -1,0 +1,202 @@
+#!/bin/bash
+#
+# Downloads test logs from GitHub Actions workflow runs for the authd repository
+# and extracts them locally.
+#
+# Requirements:
+#   - gh CLI authenticated (gh auth login)
+#   - jq
+
+set -euo pipefail
+
+usage() {
+    cat << EOF
+Usage: $0 [options]
+
+Downloads artifacts from GitHub Actions workflow runs and extracts them locally.
+
+Options:
+  --repo <owner/repo>
+      GitHub repository to query (default: canonical/authd).
+
+  --days <n>
+      Number of days back to look for workflow runs (default: 14).
+
+  --output <dir>
+      Directory to extract artifacts into
+      (default: \$XDG_DATA_HOME/authd-artifacts or ~/.local/share/authd-artifacts).
+
+  --workflow <filename>
+      Workflow filename to filter runs by (default: qa.yaml).
+
+  --job <job-id>
+      Job name to filter on (default: go-tests-coverage).
+
+  --branch <branch>
+      Branch name to filter runs by (default: main).
+
+  -h, --help
+      Show this help message and exit.
+EOF
+}
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --repo)
+            REPO="$2"
+            shift 2
+            ;;
+        --days)
+            DAYS="$2"
+            shift 2
+            ;;
+        --output)
+            OUTPUT_DIR="$2"
+            shift 2
+            ;;
+        --workflow)
+            WORKFLOW="$2"
+            shift 2
+            ;;
+        --job)
+            JOB_ID="$2"
+            shift 2
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1"
+            usage
+            exit 1
+            ;;
+    esac
+done
+
+REPO=${REPO:-"canonical/authd"}
+DAYS=${DAYS:-14}
+OUTPUT_DIR=${OUTPUT_DIR:-"${XDG_DATA_HOME:-$HOME/.local/share}/authd-artifacts"}
+WORKFLOW=${WORKFLOW:-"qa.yaml"}
+BRANCH=${BRANCH:-"main"}
+JOB_ID=${JOB_ID:-"go-tests-coverage"}
+ARTIFACT_PREFIX="authd-${JOB_ID}-artifacts"
+
+echo "Repository : $REPO"
+echo "Workflow   : $WORKFLOW"
+echo "Job filter : $JOB_ID"
+echo "Lookback   : last $DAYS days"
+echo "Output dir : $OUTPUT_DIR"
+echo
+
+# Compute cutoff date (ISO 8601)
+CUTOFF=$(date -u --date="$DAYS days ago" +%Y-%m-%dT%H:%M:%SZ)
+echo "Cutoff     : $CUTOFF"
+echo
+
+# Fetch workflow runs
+echo "Fetching workflow runs for '$WORKFLOW' ..."
+
+# The GitHub API supports a 'created' query parameter which filters server-side,
+# so only runs created after the cutoff are returned.  Pagination still applies
+# but will only traverse pages that are within the time window.
+# See: https://docs.github.com/en/rest/actions/workflow-runs#list-workflow-runs-for-a-workflow
+RUNS_JSON=$(gh api \
+    --paginate \
+    -H "Accept: application/vnd.github+json" \
+    "/repos/${REPO}/actions/workflows/${WORKFLOW}/runs?per_page=100&branch=${BRANCH}&created=>=${CUTOFF}" \
+    --jq ".workflow_runs[] | {id: .id, name: .name, created_at: .created_at, conclusion: .conclusion, html_url: .html_url}")
+
+if [[ -z "$RUNS_JSON" ]]; then
+    echo "No runs found in the last $DAYS days."
+    exit 0
+fi
+
+mapfile -t RUN_IDS < <(echo "$RUNS_JSON" | jq -r '.id')
+mapfile -t RUN_DATES < <(echo "$RUNS_JSON" | jq -r '.created_at')
+mapfile -t RUN_CONCLUSIONS < <(echo "$RUNS_JSON" | jq -r '.conclusion')
+
+echo "Found ${#RUN_IDS[@]} run(s) since $CUTOFF."
+echo
+
+job_ran_in_run() {
+    local run_id="$1"
+    gh api \
+        -H "Accept: application/vnd.github+json" \
+        "/repos/${REPO}/actions/runs/${run_id}/jobs" \
+        --jq ".jobs[] | select(.name == \"Go Tests with Coverage Collection\") | .id" \
+        2>/dev/null | grep -q .
+}
+
+mkdir -p "$OUTPUT_DIR"
+
+DOWNLOADED=0
+SKIPPED=0
+
+for i in "${!RUN_IDS[@]}"; do
+    RUN_ID="${RUN_IDS[$i]}"
+    RUN_DATE="${RUN_DATES[$i]}"
+    RUN_CONCLUSION="${RUN_CONCLUSIONS[$i]}"
+
+    RUN_DIR="${OUTPUT_DIR}/run-${RUN_ID}"
+    if [ -d "$RUN_DIR" ]; then
+        echo "Run $RUN_ID already present in $RUN_DIR, skipping."
+        (( SKIPPED++ )) || true
+        continue
+    fi
+
+    echo "Run $RUN_ID  (${RUN_DATE}  conclusion: ${RUN_CONCLUSION})"
+
+    if ! job_ran_in_run "$RUN_ID"; then
+        echo "  Job '$JOB_ID' not found in this run, skipping."
+        (( SKIPPED++ )) || true
+        continue
+    fi
+
+    ARTIFACTS_JSON=$(gh api \
+        -H "Accept: application/vnd.github+json" \
+        "/repos/${REPO}/actions/runs/${RUN_ID}/artifacts?per_page=100" \
+        --jq ".artifacts[] | select(.name | startswith(\"$ARTIFACT_PREFIX\")) | {id: .id, name: .name}")
+
+    if [[ -z "$ARTIFACTS_JSON" ]]; then
+        echo "  No matching artifacts found."
+        (( SKIPPED++ )) || true
+        continue
+    fi
+
+    while IFS= read -r artifact_line; do
+        ARTIFACT_ID=$(echo "$artifact_line" | jq -r '.id')
+        ARTIFACT_NAME=$(echo "$artifact_line" | jq -r '.name')
+
+        DEST_DIR="${OUTPUT_DIR}/run-${RUN_ID}/${ARTIFACT_NAME}"
+        mkdir -p "$DEST_DIR"
+
+        ZIP_FILE="${DEST_DIR}/artifact.zip"
+
+        echo "  Downloading artifact '$ARTIFACT_NAME' (id: $ARTIFACT_ID) ..."
+        gh api \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${REPO}/actions/artifacts/${ARTIFACT_ID}/zip" \
+            > "$ZIP_FILE" || { echo "  ERROR: download failed, skipping."; continue; }
+
+        echo "  Extracting log file to $DEST_DIR ..."
+        unzip -q -o "$ZIP_FILE" '*.log' -d "$DEST_DIR"
+        rm "$ZIP_FILE"
+
+        jq -n \
+            --arg run_id "$RUN_ID" \
+            --arg run_date "$RUN_DATE" \
+            --arg conclusion "$RUN_CONCLUSION" \
+            --arg artifact_name "$ARTIFACT_NAME" \
+            --arg artifact_id "$ARTIFACT_ID" \
+            '{run_id: $run_id, run_date: $run_date, conclusion: $conclusion, artifact_name: $artifact_name, artifact_id: $artifact_id}' \
+            > "${DEST_DIR}/meta.json"
+
+        (( DOWNLOADED++ )) || true
+    done < <(echo "$ARTIFACTS_JSON" | jq -c '.')
+done
+
+echo
+echo "Done.  Downloaded: $DOWNLOADED  Skipped: $SKIPPED"
+echo "Artifacts are in: $OUTPUT_DIR"
