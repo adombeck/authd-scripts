@@ -203,6 +203,8 @@ def main() -> None:
                         help=f"Directory containing downloaded artifacts (default: {default_input})")
     parser.add_argument("--show-errors", action="store_true",
                         help="Print error traces inline under each failing test")
+    parser.add_argument("--test-name", type=str, default=None,
+                        help="Only include failures for tests whose name contains this substring (case-insensitive)")
     args = parser.parse_args()
 
     if not args.input.is_dir():
@@ -216,6 +218,12 @@ def main() -> None:
         sys.exit(0)
 
     results = [r for d in run_dirs if (r := analyze_run(d)) is not None]
+
+    # If filtering by test name, filter failures in each result
+    if args.test_name:
+        filter_str = args.test_name.lower()
+        for result in results:
+            result.failures = [f for f in result.failures if filter_str in f.name.lower()]
 
     print(f"Analyzing {len(results)} run(s) in {args.input}\n")
 
