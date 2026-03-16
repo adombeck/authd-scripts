@@ -236,6 +236,11 @@ def main() -> None:
     print(f"Total runs analyzed : {total_runs}")
     print(f"Runs with failures  : {runs_with_failures}")
     print(f"Runs clean          : {total_runs - runs_with_failures}")
+    if total_runs > 0:
+        percent_failed = (runs_with_failures / total_runs) * 100
+        print(f"Percentage failed   : {percent_failed:.1f}%")
+    else:
+        print("Percentage failed   : N/A")
 
     if not fail_counts:
         print("\nNo test failures found.")
