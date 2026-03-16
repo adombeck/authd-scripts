@@ -205,6 +205,8 @@ def main() -> None:
                         help="Print error traces inline under each failing test")
     parser.add_argument("--test-name", type=str, default=None,
                         help="Only include failures for tests whose name contains this substring (case-insensitive)")
+    parser.add_argument("--hide-success", action="store_true",
+                        help="Do not print successful runs (runs with no failures)")
     args = parser.parse_args()
 
     if not args.input.is_dir():
@@ -232,6 +234,8 @@ def main() -> None:
     fail_counts: dict[str, int] = defaultdict(int)
 
     for result in results:
+        if args.hide_success and not result.failures:
+            continue
         print_run(result, show_errors=args.show_errors)
         if result.failures:
             runs_with_failures += 1
