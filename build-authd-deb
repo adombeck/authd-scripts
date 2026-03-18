@@ -103,12 +103,12 @@ if [ -z "${ONLY_BINARY:-}" ]; then
         --unsigned-changes
 
     if [ -z "${NO_LINTIAN:-}" ]; then
-        # shellcheck disable=SC2012 # The .dsc file doesn't contain non-alphanumeric characters
-        DSC_FILE="$(ls -t1 ../*.dsc | head -n1)"
+        # shellcheck disable=SC2012 # The changes file doesn't contain non-alphanumeric characters
+        CHANGES_FILE="$(ls -t1 ../*_source.changes | head -n1)"
         lintian --tag-display-limit 0 \
                 --pedantic \
                 --fail-on error,warning,info,pedantic \
-                "$DSC_FILE"
+                "$CHANGES_FILE"
     fi
 fi
 
