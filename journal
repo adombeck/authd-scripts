@@ -39,6 +39,9 @@ journalctl \
     SYSLOG_IDENTIFIER=authd-google \+ \
     _SYSTEMD_UNIT=snap.authd-oidc.authd-oidc.service \+ \
     UNIT=snap.authd-oidc.authd-oidc.service \+ \
-    SYSLOG_IDENTIFIER=authd-oidc \
+    SYSLOG_IDENTIFIER=authd-oidc \+ \
+    SYSLOG_IDENTIFIER=pkexec \+ \
+    SYSLOG_IDENTIFIER=polkit-agent-helper-1 \+ \
+    _COMM=polkitd \
     ${PAM:+\+ _COMM=authd-pam} \
     "$@"
