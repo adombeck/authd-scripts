@@ -10,11 +10,17 @@ Show the logs for authd and authd broker snaps. All options are passed to journa
 EOF
 }
 
+PAM=1
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -h|--help)
             usage
             exit 0
+            ;;
+        --no-pam)
+            PAM=
+            shift
             ;;
         *)
             break
@@ -33,6 +39,6 @@ journalctl \
     SYSLOG_IDENTIFIER=authd-google \+ \
     _SYSTEMD_UNIT=snap.authd-oidc.authd-oidc.service \+ \
     UNIT=snap.authd-oidc.authd-oidc.service \+ \
-    SYSLOG_IDENTIFIER=authd-oidc \+ \
-    _COMM=authd-pam \
+    SYSLOG_IDENTIFIER=authd-oidc \
+    ${PAM:+\+ _COMM=authd-pam} \
     "$@"
