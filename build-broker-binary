@@ -76,7 +76,7 @@ if [ -z "${VERSION:-}" ]; then
     VERSION=$(SEMVER=authd-oidc-brokers/tools/semver/semver ./snap/scripts/version)
 fi
 
-go mod vendor
+go -C authd-oidc-brokers mod vendor
 
 ./snap/scripts/prepare-variant --broker "${BROKER}"
 
