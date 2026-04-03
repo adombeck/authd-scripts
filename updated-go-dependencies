@@ -1,0 +1,26 @@
+#!/bin/bash
+
+set -euo pipefail
+
+usage() {
+    echo "Usage: $0 <git-ref-old> [<git-ref-new>]"
+    exit 1
+}
+
+if [ "$#" -eq 0 ] || [ "$#" -gt 2 ]; then
+    usage
+fi
+
+GIT_REF_OLD=$1
+
+if [ "$#" -eq 2 ]; then
+    GIT_REF_NEW=$2
+else
+    GIT_REF_NEW="HEAD"
+fi
+
+export GIT_PAGER=less
+
+git diff "${GIT_REF_OLD}" "${GIT_REF_NEW}" go.mod | \
+    grep -e '^\+\s' -e '^+toolchain' | \
+    sed -e 's/^\+\t/- /g' -e 's/^\+toolchain /- toolchain /g'

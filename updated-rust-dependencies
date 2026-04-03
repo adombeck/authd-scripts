@@ -1,0 +1,43 @@
+#!/bin/bash
+
+set -euo pipefail
+
+usage() {
+    echo "Usage: $0 <git-ref-old> [<git-ref-new>]"
+    exit 1
+}
+
+if [ "$#" -eq 0 ] || [ "$#" -gt 2 ]; then
+    usage
+fi
+
+GIT_REF_OLD=$1
+
+if [ "$#" -eq 2 ]; then
+    GIT_REF_NEW=$2
+else
+    GIT_REF_NEW="HEAD"
+fi
+
+CURRENT_BRANCH=$(git branch --show-current)
+
+tempdir=$(mktemp -d)
+old_versions_file="${tempdir}/old-versions.txt"
+new_versions_file="${tempdir}/new-versions.txt"
+
+git checkout -q "$GIT_REF_OLD"
+cargo metadata --format-version 1 --no-deps | \
+    jq -r '.packages[] | .dependencies[]? | "\(.name) \(.req)"' \
+    > "${new_versions_file}"
+
+git checkout -q "${GIT_REF_NEW}"
+cargo metadata --format-version 1 --no-deps | \
+    jq -r '.packages[] | .dependencies[]? | "\(.name) \(.req)"' \
+    > "${old_versions_file}"
+
+comm -13 <(sort "${old_versions_file}") <(sort "${new_versions_file}") | \
+    sed 's/^/- /g'
+
+rm -rf "$tempdir"
+
+git checkout -q "$CURRENT_BRANCH"
