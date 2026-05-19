@@ -19,12 +19,10 @@ if cargo metadata --no-deps --frozen --quiet >/dev/null 2>&1; then
     fi
 fi
 
-install_golangci_lint() {
-    local version
-    version=$(go mod edit -json "tools/go.mod" | \
-      jq -r '.Require[] | select(.Path | test("golangci-lint")) | .Version')
-    go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@"$version"
-}
+# Install golangci-lint at the version specified in tools/go.mod
+version=$(go mod edit -json "tools/go.mod" | \
+  jq -r '.Require[] | select(.Path | test("golangci-lint")) | .Version')
+go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@"$version"
 
 if ! golangci-lint run; then
     set +x
