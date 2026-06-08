@@ -1,0 +1,346 @@
+#!/usr/bin/env bash
+#
+# Downloads selected artifacts from GitHub Actions workflow runs
+# and extracts only requested files.
+#
+# Requirements:
+#   - gh CLI authenticated (gh auth login)
+#   - jq
+
+set -euo pipefail
+
+usage() {
+    cat << EOF
+Usage: $0 [options]
+
+Downloads workflow artifacts and extracts only selected files.
+
+Required options:
+  --repo <owner/repo>
+      GitHub repository to query.
+
+  --workflow <filename>
+      Workflow filename to filter runs by (for example: qa.yaml).
+
+  --branch <branch>
+      Branch name to filter runs by.
+
+  --artifact-prefix <prefix>
+      Only download artifacts whose names start with this prefix.
+
+  --output <dir>
+      Directory where artifacts are extracted.
+
+  --extract <glob>
+      File glob to extract from each artifact zip (can be used multiple times).
+      Examples: --extract "*.log" --extract "*.journal"
+
+Run selection:
+  --from <date-or-iso>
+      Start of date range, inclusive (for example: 2026-06-01).
+
+  --to <date-or-iso>
+      End of date range, inclusive (for example: 2026-06-08).
+
+  --days <n>
+      Number of days back to query if --from/--to are not provided.
+
+Job filtering (choose one mode):
+  --job <job-name>
+      Require this job to be present in each run.
+
+  --no-job-filter
+      Do not require a specific job in each run.
+
+  -h, --help
+      Show this help message and exit.
+EOF
+}
+
+EXTRACT_PATTERNS=()
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --repo)
+            REPO="$2"
+            shift 2
+            ;;
+        --workflow)
+            WORKFLOW="$2"
+            shift 2
+            ;;
+        --branch)
+            BRANCH="$2"
+            shift 2
+            ;;
+        --artifact-prefix)
+            ARTIFACT_PREFIX="$2"
+            shift 2
+            ;;
+        --output)
+            OUTPUT_DIR="$2"
+            shift 2
+            ;;
+        --from)
+            DATE_FROM="$2"
+            shift 2
+            ;;
+        --to)
+            DATE_TO="$2"
+            shift 2
+            ;;
+        --days)
+            DAYS="$2"
+            shift 2
+            ;;
+        --job)
+            JOB_NAME="$2"
+            shift 2
+            ;;
+        --no-job-filter)
+            NO_JOB_FILTER=1
+            shift
+            ;;
+        --extract)
+            EXTRACT_PATTERNS+=("$2")
+            shift 2
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1" >&2
+            usage
+            exit 1
+            ;;
+    esac
+done
+
+NO_JOB_FILTER=${NO_JOB_FILTER:-0}
+
+if [[ -z "${REPO:-}" || -z "${WORKFLOW:-}" || -z "${BRANCH:-}" || -z "${ARTIFACT_PREFIX:-}" || -z "${OUTPUT_DIR:-}" ]]; then
+    echo "Missing required options." >&2
+    usage
+    exit 1
+fi
+
+if [[ ${#EXTRACT_PATTERNS[@]} -eq 0 ]]; then
+    echo "At least one --extract pattern is required." >&2
+    usage
+    exit 1
+fi
+
+if [[ "$NO_JOB_FILTER" -eq 1 && -n "${JOB_NAME:-}" ]]; then
+    echo "Use either --job or --no-job-filter, not both." >&2
+    exit 1
+fi
+
+if [[ "$NO_JOB_FILTER" -ne 1 && -z "${JOB_NAME:-}" ]]; then
+    echo "Provide --job or use --no-job-filter." >&2
+    exit 1
+fi
+
+if [[ -z "${DATE_FROM:-}" && -z "${DATE_TO:-}" && -z "${DAYS:-}" ]]; then
+    echo "Provide --days or a --from/--to date range." >&2
+    exit 1
+fi
+
+if [[ -n "${DATE_FROM:-}" && -n "${DATE_TO:-}" ]]; then
+    CREATED_QUERY="${DATE_FROM}..${DATE_TO}"
+elif [[ -n "${DATE_FROM:-}" ]]; then
+    CREATED_QUERY=">=${DATE_FROM}"
+elif [[ -n "${DATE_TO:-}" ]]; then
+    CREATED_QUERY="<=${DATE_TO}"
+else
+    CUTOFF=$(date -u --date="$DAYS days ago" +%Y-%m-%dT%H:%M:%SZ)
+    CREATED_QUERY=">=${CUTOFF}"
+fi
+
+echo "Repository : $REPO"
+echo "Workflow   : $WORKFLOW"
+echo "Branch     : $BRANCH"
+echo "Artifacts  : prefix '$ARTIFACT_PREFIX'"
+if [[ "$NO_JOB_FILTER" -eq 1 ]]; then
+    echo "Job filter : disabled"
+else
+    echo "Job filter : $JOB_NAME"
+fi
+echo "Created    : $CREATED_QUERY"
+echo "Extract    : ${EXTRACT_PATTERNS[*]}"
+echo "Output dir : $OUTPUT_DIR"
+echo
+
+RUNS_ENDPOINT="/repos/${REPO}/actions/workflows/${WORKFLOW}/runs?per_page=100&branch=${BRANCH}&created=${CREATED_QUERY}"
+RUNS_JSON=$(gh api \
+    --paginate \
+    -H "Accept: application/vnd.github+json" \
+    "$RUNS_ENDPOINT" \
+    --jq ".workflow_runs[] | {id: .id, created_at: .created_at, conclusion: .conclusion}")
+
+if [[ -z "$RUNS_JSON" ]]; then
+    echo "No runs found."
+    exit 0
+fi
+
+mapfile -t RUN_IDS < <(echo "$RUNS_JSON" | jq -r '.id')
+mapfile -t RUN_DATES < <(echo "$RUNS_JSON" | jq -r '.created_at')
+mapfile -t RUN_CONCLUSIONS < <(echo "$RUNS_JSON" | jq -r '.conclusion')
+
+echo "Found ${#RUN_IDS[@]} run(s)."
+echo
+
+job_ran_in_run() {
+    local run_id="$1"
+    gh api \
+        -H "Accept: application/vnd.github+json" \
+        "/repos/${REPO}/actions/runs/${run_id}/jobs" \
+        2>/dev/null | jq -e --arg name "$JOB_NAME" '.jobs[] | select(.name == $name) | .id' >/dev/null
+}
+
+run_metadata() {
+    local run_id="$1"
+    local run_json event pr_number head_sha head_branch event_id
+
+    run_json=$(gh api \
+        -H "Accept: application/vnd.github+json" \
+        "/repos/${REPO}/actions/runs/${run_id}" \
+        2>/dev/null) || return 1
+
+    event=$(printf '%s' "$run_json" | jq -r '.event // ""')
+    pr_number=$(printf '%s' "$run_json" | jq -r '.pull_requests[0].number // ""')
+    head_sha=$(printf '%s' "$run_json" | jq -r '.head_sha // ""')
+    head_branch=$(printf '%s' "$run_json" | jq -r '.head_branch // ""')
+
+    if [[ "$event" == pull_request* && -z "$pr_number" && -n "$head_sha" ]]; then
+        pr_number=$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${REPO}/commits/${head_sha}/pulls" \
+            --jq '.[0].number // ""' 2>/dev/null || true)
+    fi
+
+    if [[ "$event" == pull_request* && -z "$pr_number" && -n "$head_branch" ]]; then
+        pr_number=$(gh pr list \
+            --repo "$REPO" \
+            --state all \
+            --head "$head_branch" \
+            --limit 1 \
+            --json number \
+            --jq '.[0].number // ""' 2>/dev/null || true)
+    fi
+
+    if [[ "$event" != pull_request* ]]; then
+        pr_number=""
+    fi
+
+    if [[ -n "$head_sha" ]]; then
+        event_id="${head_sha:0:12}"
+    else
+        event_id="$run_id"
+    fi
+
+    printf '%s\t%s\t%s' "$event" "$pr_number" "$event_id"
+}
+
+mkdir -p "$OUTPUT_DIR"
+
+DOWNLOADED=0
+SKIPPED=0
+
+for i in "${!RUN_IDS[@]}"; do
+    RUN_ID="${RUN_IDS[$i]}"
+    RUN_DATE="${RUN_DATES[$i]}"
+    RUN_CONCLUSION="${RUN_CONCLUSIONS[$i]}"
+    RUN_EVENT=""
+    RUN_PR=""
+    RUN_EVENT_ID="$RUN_ID"
+    if run_meta="$(run_metadata "$RUN_ID")"; then
+        RUN_EVENT="$(printf '%s' "$run_meta" | cut -f1)"
+        RUN_PR="$(printf '%s' "$run_meta" | cut -f2)"
+        RUN_EVENT_ID="$(printf '%s' "$run_meta" | cut -f3)"
+    fi
+
+    if [[ -n "$RUN_PR" ]]; then
+        RUN_SCOPE="pr-${RUN_PR}"
+    else
+        RUN_SCOPE="${RUN_EVENT:-unknown}-${RUN_EVENT_ID:-$RUN_ID}"
+    fi
+    RUN_DIR="${OUTPUT_DIR}/${RUN_SCOPE}/run-${RUN_ID}"
+    mkdir -p "$RUN_DIR"
+
+    echo "Run $RUN_ID  (${RUN_DATE}  conclusion: ${RUN_CONCLUSION})"
+
+    if [[ "$NO_JOB_FILTER" -ne 1 ]]; then
+        if ! job_ran_in_run "$RUN_ID"; then
+            echo "  Job '$JOB_NAME' not found in this run, skipping."
+            (( SKIPPED++ )) || true
+            continue
+        fi
+    fi
+
+    ARTIFACTS_JSON=$(gh api \
+        -H "Accept: application/vnd.github+json" \
+        "/repos/${REPO}/actions/runs/${RUN_ID}/artifacts?per_page=100" \
+        --jq ".artifacts[] | select(.name | startswith(\"$ARTIFACT_PREFIX\")) | {id: .id, name: .name}")
+
+    if [[ -z "$ARTIFACTS_JSON" ]]; then
+        echo "  No matching artifacts found."
+        (( SKIPPED++ )) || true
+        continue
+    fi
+
+    while IFS= read -r artifact_line; do
+        ARTIFACT_ID=$(echo "$artifact_line" | jq -r '.id')
+        ARTIFACT_NAME=$(echo "$artifact_line" | jq -r '.name')
+
+        DEST_DIR="${RUN_DIR}/${ARTIFACT_NAME}"
+        if [[ -f "${DEST_DIR}/meta.json" ]]; then
+            echo "  Artifact '$ARTIFACT_NAME' already present in $DEST_DIR, skipping."
+            (( SKIPPED++ )) || true
+            continue
+        fi
+        mkdir -p "$DEST_DIR"
+
+        ZIP_FILE="${DEST_DIR}/artifact.zip"
+
+        echo "  Downloading artifact '$ARTIFACT_NAME' (id: $ARTIFACT_ID) ..."
+        gh api \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${REPO}/actions/artifacts/${ARTIFACT_ID}/zip" \
+            > "$ZIP_FILE" || { echo "  ERROR: download failed, skipping."; continue; }
+
+        echo "  Extracting selected files to $DEST_DIR ..."
+        if unzip -q -o "$ZIP_FILE" "${EXTRACT_PATTERNS[@]}" -d "$DEST_DIR"; then
+            :
+        else
+            unzip_exit=$?
+            if [[ "$unzip_exit" -eq 11 ]]; then
+                echo "  No files matching extract patterns in this artifact."
+            else
+                echo "  ERROR: failed to extract artifact (unzip exit $unzip_exit)." >&2
+                rm "$ZIP_FILE"
+                continue
+            fi
+        fi
+        rm "$ZIP_FILE"
+
+        jq -n \
+            --arg run_id "$RUN_ID" \
+            --arg pr_number "$RUN_PR" \
+            --arg event "$RUN_EVENT" \
+            --arg event_id "$RUN_EVENT_ID" \
+            --arg run_scope "$RUN_SCOPE" \
+            --arg run_date "$RUN_DATE" \
+            --arg conclusion "$RUN_CONCLUSION" \
+            --arg artifact_name "$ARTIFACT_NAME" \
+            --arg artifact_id "$ARTIFACT_ID" \
+            '{run_id: $run_id, pr_number: $pr_number, event: $event, event_id: $event_id, run_scope: $run_scope, run_date: $run_date, conclusion: $conclusion, artifact_name: $artifact_name, artifact_id: $artifact_id}' \
+            > "${DEST_DIR}/meta.json"
+
+        (( DOWNLOADED++ )) || true
+    done < <(echo "$ARTIFACTS_JSON" | jq -c '.')
+done
+
+echo
+echo "Done.  Downloaded: $DOWNLOADED  Skipped: $SKIPPED"
+echo "Artifacts are in: $OUTPUT_DIR"
