@@ -29,8 +29,8 @@ Options:
   --workflow <filename>
       Workflow filename to filter runs by (default: qa.yaml).
 
-  --job <job-id>
-      Job name to filter on (default: go-tests-coverage).
+  --job <job-name>
+      Job name to filter on (default: Go Tests with Coverage Collection).
 
   --branch <branch>
       Branch name to filter runs by (default: main).
@@ -60,7 +60,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --job)
-            JOB_ID="$2"
+            JOB_NAME="$2"
             shift 2
             ;;
         -h|--help)
@@ -81,11 +81,12 @@ OUTPUT_DIR=${OUTPUT_DIR:-"${XDG_DATA_HOME:-$HOME/.local/share}/authd-artifacts"}
 WORKFLOW=${WORKFLOW:-"qa.yaml"}
 BRANCH=${BRANCH:-"main"}
 JOB_ID=${JOB_ID:-"go-tests-coverage"}
+JOB_NAME=${JOB_NAME:-"Go Tests with Coverage Collection"}
 ARTIFACT_PREFIX="authd-${JOB_ID}-artifacts"
 
 echo "Repository : $REPO"
 echo "Workflow   : $WORKFLOW"
-echo "Job filter : $JOB_ID"
+echo "Job filter : $JOB_NAME"
 echo "Lookback   : last $DAYS days"
 echo "Output dir : $OUTPUT_DIR"
 echo
@@ -125,7 +126,7 @@ job_ran_in_run() {
     gh api \
         -H "Accept: application/vnd.github+json" \
         "/repos/${REPO}/actions/runs/${run_id}/jobs" \
-        --jq ".jobs[] | select(.name == \"Go Tests with Coverage Collection\") | .id" \
+        --jq ".jobs[] | select(.name == \"$JOB_NAME\") | .id" \
         2>/dev/null | grep -q .
 }
 
@@ -149,7 +150,7 @@ for i in "${!RUN_IDS[@]}"; do
     echo "Run $RUN_ID  (${RUN_DATE}  conclusion: ${RUN_CONCLUSION})"
 
     if ! job_ran_in_run "$RUN_ID"; then
-        echo "  Job '$JOB_ID' not found in this run, skipping."
+        echo "  Job '$JOB_NAME' not found in this run, skipping."
         (( SKIPPED++ )) || true
         continue
     fi
