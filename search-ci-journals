@@ -1,0 +1,158 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+usage() {
+    cat << EOF
+Usage: $0 [options] <term> [-- <journalctl-args...>]
+
+Searches all CI-downloaded .journal files directly with journalctl.
+
+Options:
+  --input <dir>
+      Root directory containing downloaded artifacts.
+      Default: \$XDG_DATA_HOME/authd-e2e-artifacts or ~/.local/share/authd-e2e-artifacts
+
+  --name <glob>
+      Journal filename glob to match (default: *.journal)
+
+  --log-base-url <url>
+      Base URL for hosted test logs
+      (default: https://authd-e2e-test-logs.adrian-dombeck.workers.dev)
+
+  --no-ignore-case
+      Case-sensitive search. By default, search is case-insensitive.
+
+  -h, --help
+      Show this help message and exit.
+
+Examples:
+  $0 "timeout"
+  $0 "pam_authenticate" -- --since "2026-06-01" -o short-monotonic
+EOF
+}
+
+INPUT_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/authd-e2e-artifacts"
+NAME_GLOB="*.journal"
+IGNORE_CASE=1
+LOG_BASE_URL="https://authd-e2e-test-logs.adrian-dombeck.workers.dev"
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --input)
+            INPUT_DIR="$2"
+            shift 2
+            ;;
+        --name)
+            NAME_GLOB="$2"
+            shift 2
+            ;;
+        --log-base-url)
+            LOG_BASE_URL="$2"
+            shift 2
+            ;;
+        --no-ignore-case)
+            IGNORE_CASE=0
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        --)
+            shift
+            break
+            ;;
+        -*)
+            echo "Unknown option: $1" >&2
+            usage
+            exit 1
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
+
+if [[ $# -lt 1 ]]; then
+    echo "Missing required <term>." >&2
+    usage
+    exit 1
+fi
+
+TERM="$1"
+shift
+
+if [[ ! -d "$INPUT_DIR" ]]; then
+    echo "Input directory does not exist: $INPUT_DIR" >&2
+    exit 1
+fi
+
+if ! command -v journalctl >/dev/null 2>&1; then
+    echo "journalctl not found in PATH" >&2
+    exit 1
+fi
+
+if [[ "$IGNORE_CASE" -eq 1 ]]; then
+    GREP_PATTERN="(?i)${TERM}"
+else
+    GREP_PATTERN="${TERM}"
+fi
+
+mapfile -d '' -t JOURNAL_FILES < <(find "$INPUT_DIR" -type f -name "$NAME_GLOB" -print0 | sort -z)
+if [[ ${#JOURNAL_FILES[@]} -eq 0 ]]; then
+    echo "No files matching '$NAME_GLOB' found under $INPUT_DIR"
+    exit 0
+fi
+
+for jf in "${JOURNAL_FILES[@]}"; do
+    tmp_output=$(mktemp)
+    journalctl --no-pager --file "$jf" --grep "$GREP_PATTERN" "$@" >"$tmp_output" || true
+
+    if awk 'NF && $0 != "-- No entries --" { found=1 } END { exit !found }' "$tmp_output"; then
+        rel_path="${jf#"$INPUT_DIR"/}"
+        pr_number=""
+        run_id=""
+        artifact_and_below="$rel_path"
+        if [[ "$rel_path" =~ ^pr-([0-9]+)/run-([0-9]+)/(.*)$ ]]; then
+            pr_number="${BASH_REMATCH[1]}"
+            run_id="${BASH_REMATCH[2]}"
+            artifact_and_below="${BASH_REMATCH[3]}"
+        elif [[ "$rel_path" =~ ^[^/]+-[^/]+/run-([0-9]+)/(.*)$ ]]; then
+            run_id="${BASH_REMATCH[1]}"
+            artifact_and_below="${BASH_REMATCH[2]}"
+        else
+            rm -f "$tmp_output"
+            continue
+        fi
+        artifact_name="${artifact_and_below%%/*}"
+        remainder="${artifact_and_below#*/}"
+        suite_path="$remainder"
+        if [[ "$remainder" == *"/journal/"* ]]; then
+            suite_path="${remainder%%/journal/*}"
+        fi
+        section_name="${artifact_name}/${suite_path}"
+
+        log_url=""
+        if [[ "$artifact_name" =~ ^e2e-tests-(.+)-([0-9]+)-([0-9]+)$ ]]; then
+            target="${BASH_REMATCH[1]}"
+            artifact_run_id="${BASH_REMATCH[2]}"
+            run_attempt="${BASH_REMATCH[3]}"
+            if [[ -n "$artifact_run_id" ]]; then
+                run_id="$artifact_run_id"
+            fi
+            if [[ -n "$pr_number" ]]; then
+                log_url="${LOG_BASE_URL%/}/pr-${pr_number}/run-${run_id}-${run_attempt}/${target}/log.html"
+            fi
+        fi
+
+        echo "=== ${section_name} ==="
+        if [[ -n "$log_url" ]]; then
+            echo "URL: $log_url"
+        fi
+        echo "Journal: $jf"
+        cat "$tmp_output"
+    fi
+
+    rm -f "$tmp_output"
+done
