@@ -54,3 +54,17 @@ cd "${BUILD_DIR}"
 if [ -s /tmp/uncommitted.patch ]; then
     git apply /tmp/uncommitted.patch
 fi
+
+# Initialize submodules, using the corresponding submodule checkout in the
+# main repo as a local object reference (when possible) to avoid fetching
+# over the network. Falls back to a normal fetch if the local checkout can't
+# be used as a reference (e.g. it's a shallow clone).
+if [ -f .gitmodules ]; then
+    git config --file .gitmodules --get-regexp '\.path$' | while read -r _ sm_path; do
+        main_repo_sm_path="${GIT_ROOT_DIR}/${sm_path}"
+        if ! git submodule update --init --reference "${main_repo_sm_path}" -- "${sm_path}"; then
+            git submodule update --init -- "${sm_path}"
+        fi
+    done
+fi
+git submodule update --init --recursive
