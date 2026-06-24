@@ -4,7 +4,7 @@ set -euo pipefail
 
 usage() {
     cat << EOF
-Usage: $0 [--build-dir <dir>]
+Usage: $0 [options]
 
 Clone the current git repository to a directory and apply uncommitted changes.
 This is useful for building the package in a clean environment without files that
@@ -12,9 +12,30 @@ are not tracked by git, while still including uncommitted changes in the build.
 
 Options:
   -d, --build-dir <dir>  Path to the build directory (default: ../build/<repo>)
+  --in-place             Reuse an existing build directory instead of recreating
+                         it: refresh it with git fetch/reset rather than
+                         rm -rf + clone. This keeps the directory's inode stable,
+                         which matters for snapcraft (it names its LXD build
+                         instance after the project directory's inode, so a
+                         stable inode lets one warm build instance be reused).
+  --ensure-main          Create a local "main" branch in the build directory
+                         pointing at the source repo's main. Needed by build
+                         logic that derives a version from 'git merge-base main
+                         HEAD' on non-main branches (e.g. snap/scripts/version).
+  --self-contained-submodules
+                         Copy submodule objects fully into the build directory
+                         instead of referencing the source repo's object store.
+                         Needed when the build directory's .git is copied into an
+                         isolated environment (e.g. a snapcraft LXD instance)
+                         where the source repo's path does not exist; a leftover
+                         'alternates' link there breaks 'git status'.
   -h, --help             Show this help message
 EOF
 }
+
+IN_PLACE=
+ENSURE_MAIN=
+SELF_CONTAINED_SUBMODULES=
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -22,6 +43,18 @@ while [[ $# -gt 0 ]]; do
         -d|--build-dir)
             BUILD_DIR="$2"
             shift 2
+            ;;
+        --in-place)
+            IN_PLACE=1
+            shift
+            ;;
+        --ensure-main)
+            ENSURE_MAIN=1
+            shift
+            ;;
+        --self-contained-submodules)
+            SELF_CONTAINED_SUBMODULES=1
+            shift
             ;;
         -h|--help)
             usage
@@ -38,33 +71,80 @@ done
 GIT_ROOT_DIR=$(git rev-parse --show-toplevel)
 BUILD_DIR=${BUILD_DIR:-../build/$(basename "${GIT_ROOT_DIR}")}
 
+# Capture state from the source repo before switching directories.
+SRC_HEAD=$(git rev-parse HEAD)
+SRC_BRANCH=$(git branch --show-current)
+if [ -n "${ENSURE_MAIN}" ]; then
+    MAIN_COMMIT=$(git rev-parse main)
+fi
+
 set -x
 
-# Export uncommitted changes from main repo
+# Export uncommitted changes from the source repo.
 git diff > /tmp/uncommitted.patch
 git diff --staged >> /tmp/uncommitted.patch
 
-# Clone the directory
-rm -rf "${BUILD_DIR}"
-mkdir -p "$(dirname "${BUILD_DIR}")"
-git clone "${GIT_ROOT_DIR}" "${BUILD_DIR}"
-cd "${BUILD_DIR}"
+if [ -n "${IN_PLACE}" ] && [ -d "${BUILD_DIR}/.git" ]; then
+    # Refresh the existing build directory in place to keep its inode stable.
+    cd "${BUILD_DIR}"
+    git fetch --quiet "${GIT_ROOT_DIR}" HEAD
+    # Check out the source's branch name (not a detached HEAD) so build logic
+    # that reads 'git branch --show-current' keeps working.
+    git checkout --quiet -B "${SRC_BRANCH:-build}" "${SRC_HEAD}"
+    git reset --hard "${SRC_HEAD}"
+    git clean -fdx
+else
+    # Fresh clone.
+    rm -rf "${BUILD_DIR}"
+    mkdir -p "$(dirname "${BUILD_DIR}")"
+    git clone "${GIT_ROOT_DIR}" "${BUILD_DIR}"
+    cd "${BUILD_DIR}"
+fi
 
-# Apply uncommitted changes from the main repo
+# Apply uncommitted changes from the source repo.
 if [ -s /tmp/uncommitted.patch ]; then
     git apply /tmp/uncommitted.patch
 fi
 
-# Initialize submodules, using the corresponding submodule checkout in the
-# main repo as a local object reference (when possible) to avoid fetching
-# over the network. Falls back to a normal fetch if the local checkout can't
-# be used as a reference (e.g. it's a shallow clone).
+if [ -n "${ENSURE_MAIN}" ]; then
+    # Make a local "main" branch point at the source's main commit. Skip it when
+    # the build dir is already checked out on 'main' (building from the main
+    # worktree): the branch is then in use and 'git branch -f' would refuse it,
+    # but it already points where we want since SRC_HEAD == MAIN_COMMIT there.
+    if [ "$(git branch --show-current)" != "main" ]; then
+        git branch --no-track -f main "${MAIN_COMMIT}"
+    fi
+fi
+
 if [ -f .gitmodules ]; then
-    git config --file .gitmodules --get-regexp '\.path$' | while read -r _ sm_path; do
-        main_repo_sm_path="${GIT_ROOT_DIR}/${sm_path}"
-        if ! git submodule update --init --reference "${main_repo_sm_path}" -- "${sm_path}"; then
-            git submodule update --init -- "${sm_path}"
-        fi
-    done
+    if [ -n "${SELF_CONTAINED_SUBMODULES}" ]; then
+        # Point each submodule's origin at the source repo's checkout so the
+        # objects are copied locally (fast, no network) into a complete,
+        # standalone store, with no 'alternates' link back to the source.
+        git config --file .gitmodules --get-regexp '\.path$' | while read -r _ sm_path; do
+            src_sm="${GIT_ROOT_DIR}/${sm_path}"
+            if [ -e "${src_sm}/.git" ]; then
+                git config "submodule.${sm_path}.url" "${src_sm}"
+            fi
+        done
+        git submodule sync --recursive
+    else
+        # Initialize submodules, using the corresponding submodule checkout in the
+        # source repo as a local object reference (when possible) to avoid fetching
+        # over the network. Falls back to a normal fetch if the local checkout can't
+        # be used as a reference (e.g. it's a shallow clone).
+        git config --file .gitmodules --get-regexp '\.path$' | while read -r _ sm_path; do
+            main_repo_sm_path="${GIT_ROOT_DIR}/${sm_path}"
+            if ! git submodule update --init --reference "${main_repo_sm_path}" -- "${sm_path}"; then
+                git submodule update --init -- "${sm_path}"
+            fi
+        done
+    fi
 fi
 git submodule update --init --recursive
+
+if [ -n "${SELF_CONTAINED_SUBMODULES}" ]; then
+    # Drop any 'alternates' files (e.g. left by a previous non-self-contained
+    # run on a reused build dir) so the submodule object stores stay standalone.
+    find .git -path '*/objects/info/alternates' -delete 2>/dev/null || true
+fi

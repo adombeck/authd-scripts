@@ -4,13 +4,20 @@ set -euo pipefail
 
 usage() {
         cat << EOF
-Usage: $0 --broker <broker> [--build-dir <dir>] [snapcraft options]
+Usage: $0 --broker <broker> [--build-dir <dir>] [--snap-src-dir <dir>] [snapcraft options]
 
 Builds the broker snap and extracts it into a squashfs root directory.
 You can install the extracted snap with:
   sudo snap try <squashfs-root-dir>
 
-This script must be run from the root of the authd repository.
+This script must be run from the root of the authd repository (or any of its
+worktrees).
+
+The snap is built from a clean clone of the current worktree (HEAD plus
+uncommitted changes) placed in a fixed directory shared across all worktrees and
+brokers. This lets snapcraft reuse a single LXD build instance regardless of
+which worktree you build from, keeping the Go and cargo caches warm instead of
+rebuilding from scratch for every worktree.
 
 Options:
   --broker <broker>
@@ -19,6 +26,11 @@ Options:
   --build-dir <dir>
       Directory to place the built snap and the extracted squashfs root directory.
       Defaults to ../build.
+  --snap-src-dir <dir>
+      Fixed directory the worktree is cloned into and snapcraft is run from.
+      Sharing one path across worktrees and brokers is what enables build-cache
+      reuse, so only change this if you want a separate cache.
+      Defaults to ~/projects/build/authd-broker-snap.
 
 All other options are passed to snapcraft.
 EOF
@@ -33,6 +45,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --build-dir)
             BUILD_DIR="$2"
+            shift 2
+            ;;
+        --snap-src-dir)
+            SNAP_SRC_DIR="$2"
             shift 2
             ;;
         -h|--help)
@@ -51,9 +67,28 @@ if [ -z "${BROKER:-}" ]; then
     exit 1
 fi
 
+# Resolve the output directory relative to the current worktree before we cd
+# into the shared build directory.
 BUILD_DIR=${BUILD_DIR:-"$(realpath ../build)"}
+SNAP_SRC_DIR=${SNAP_SRC_DIR:-"${HOME}/projects/build/authd-broker-snap"}
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 set -x
+
+# Build from a fixed directory shared across all worktrees, refreshed in place
+# so its inode stays stable: snapcraft names its LXD build instance after the
+# project directory's inode, so one warm build instance is reused across
+# worktrees (recreating the directory would spawn a new instance every build).
+# --ensure-main: snap/scripts/version needs a local 'main' for non-main branches.
+# --self-contained-submodules: snapcraft copies .git into the build instance,
+# where any 'alternates' link back to this host would break 'git status'.
+"${SCRIPT_DIR}/create-build-dir" \
+    --build-dir "${SNAP_SRC_DIR}" \
+    --in-place \
+    --ensure-main \
+    --self-contained-submodules
+cd "${SNAP_SRC_DIR}"
 
 go mod vendor
 
