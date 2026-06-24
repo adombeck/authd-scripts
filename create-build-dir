@@ -88,6 +88,26 @@ if [ -n "${IN_PLACE}" ] && [ -d "${BUILD_DIR}/.git" ]; then
     # Refresh the existing build directory in place to keep its inode stable.
     cd "${BUILD_DIR}"
     git fetch --quiet "${GIT_ROOT_DIR}" HEAD
+    # Seed each existing submodule's object store from the matching submodule in
+    # the source repo before the outer checkout below tries to update it. The
+    # source checkout always has every commit we have checked out locally, even
+    # ones that live only on a personal/WIP remote and were never pushed to the
+    # submodule's 'origin'. Without this, 'git checkout' aborts with "failed to
+    # unpack tree object" whenever the pinned submodule commit isn't reachable
+    # from the build clone's remotes.
+    git config --file .gitmodules --get-regexp '\.path$' 2>/dev/null \
+        | while read -r _ sm_path; do
+        src_sm="${GIT_ROOT_DIR}/${sm_path}"
+        if [ -e "${BUILD_DIR}/${sm_path}/.git" ] && [ -e "${src_sm}/.git" ]; then
+            # Fetch the exact commit this submodule is pinned to at SRC_HEAD. It
+            # may be a detached commit reachable from no branch (a WIP commit
+            # only on a personal remote), so ask for the SHA directly rather
+            # than relying on branch tips.
+            sm_commit=$(git rev-parse "${SRC_HEAD}:${sm_path}" 2>/dev/null) || continue
+            git -C "${BUILD_DIR}/${sm_path}" fetch --quiet "${src_sm}" \
+                "${sm_commit}" || true
+        fi
+    done
     # Check out the source's branch name (not a detached HEAD) so build logic
     # that reads 'git branch --show-current' keeps working.
     git checkout --quiet -B "${SRC_BRANCH:-build}" "${SRC_HEAD}"
