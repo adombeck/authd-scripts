@@ -101,7 +101,15 @@ go mod vendor
 # which then collides with the current sources and breaks 'go build'. Cleaning
 # only the 'broker' part wipes its lifecycle state without touching
 # libhimmelblau (and its cargo cache), so builds stay fast.
-snapcraft clean broker
+#
+# Also clean the 'version' part. It computes the snap version (via adopt-info)
+# from the git state and exports it as a project variable. Once its BUILD step
+# has run, snapcraft caches that variable and skips the step on subsequent
+# packs ("already ran"), reusing the stale version from whichever git state the
+# build instance was first created with — even though the script recomputes the
+# correct value, the cached variable is what ends up in the .snap filename and
+# the embedded -ldflags Version. Cleaning the part forces a recompute.
+snapcraft clean broker version
 
 time snapcraft pack "$@"
 
