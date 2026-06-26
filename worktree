@@ -12,10 +12,28 @@ workspace="../authd-${branch}"
     set -euo pipefail
 
     if [ ! -d "$workspace" ]; then
-        git worktree add \
-            --guess-remote \
-            "$workspace" \
-            "$branch"
+        if git show-ref --verify --quiet "refs/heads/$branch"; then
+            git worktree add \
+                "$workspace" \
+                "$branch"
+        else
+            remote_branch=$(git for-each-ref \
+                --format='%(refname:short)' \
+                "refs/remotes/*/$branch" \
+                | head -n1)
+
+            if [ -n "$remote_branch" ]; then
+                git worktree add \
+                    --track \
+                    -b "$branch" \
+                    "$workspace" \
+                    "$remote_branch"
+            else
+                git worktree add \
+                    -b "$branch" \
+                    "$workspace"
+            fi
+        fi
 
         # Set up the submodule for libhimmelblau.
         SUBMOD=authd-oidc-brokers/third_party/libhimmelblau
