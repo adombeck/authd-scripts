@@ -1,0 +1,33 @@
+#!/bin/dash
+
+if [ "$#" -ne 1 ]; then
+    echo "Usage: source $0 <branch-name>" >&2
+    return 1 2>/dev/null || exit 1
+fi
+
+branch="$1"
+workspace="../authd-${branch}"
+
+(
+    set -euo pipefail
+
+    if [ ! -d "$workspace" ]; then
+        git worktree add \
+            --guess-remote \
+            "$workspace" \
+            "$branch"
+
+        # Set up the submodule for libhimmelblau.
+        SUBMOD=authd-oidc-brokers/third_party/libhimmelblau
+        WORKTREE=$(basename "$(git rev-parse --show-toplevel)")
+        MAINREPO="$(git rev-parse --show-toplevel | xargs -I{} dirname {})/authd"
+
+        rm -rf \
+            "$MAINREPO/.git/worktrees/$WORKTREE/modules/$SUBMOD" \
+            "$SUBMOD/.git"
+
+        git submodule update --init --recursive "$SUBMOD"
+    fi
+) || return 1
+
+cd "$workspace" || return 1
