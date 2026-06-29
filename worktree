@@ -1,51 +1,261 @@
 #!/bin/dash
 
-if [ "$#" -ne 1 ]; then
+usage() {
     echo "Usage: source $0 <branch-name>" >&2
-    return 1 2>/dev/null || exit 1
-fi
+    echo "       source $0 --cleanup [--force]" >&2
+}
 
-branch="$1"
-workspace="../authd-${branch}"
+create_worktree() {
+    branch="$1"
+    workspace="../authd-${branch}"
 
-(
-    set -euo pipefail
+    (
+        set -euo pipefail
 
-    if [ ! -d "$workspace" ]; then
-        if git show-ref --verify --quiet "refs/heads/$branch"; then
-            git worktree add \
-                "$workspace" \
-                "$branch"
-        else
-            remote_branch=$(git for-each-ref \
-                --format='%(refname:short)' \
-                "refs/remotes/*/$branch" \
-                | head -n1)
-
-            if [ -n "$remote_branch" ]; then
+        if [ ! -d "$workspace" ]; then
+            if git show-ref --verify --quiet "refs/heads/$branch"; then
                 git worktree add \
-                    --track \
-                    -b "$branch" \
                     "$workspace" \
-                    "$remote_branch"
+                    "$branch"
             else
-                git worktree add \
-                    -b "$branch" \
-                    "$workspace"
+                remote_branch=$(git for-each-ref \
+                    --format='%(refname:short)' \
+                    "refs/remotes/*/$branch" \
+                    | head -n1)
+
+                if [ -n "$remote_branch" ]; then
+                    git worktree add \
+                        --track \
+                        -b "$branch" \
+                        "$workspace" \
+                        "$remote_branch"
+                else
+                    git worktree add \
+                        -b "$branch" \
+                        "$workspace"
+                fi
+            fi
+
+            # Set up the submodule for libhimmelblau.
+            SUBMOD=authd-oidc-brokers/third_party/libhimmelblau
+            WORKTREE=$(basename "$(git rev-parse --show-toplevel)")
+            MAINREPO="$(git rev-parse --show-toplevel | xargs -I{} dirname {})/authd"
+
+            rm -rf \
+                "$MAINREPO/.git/worktrees/$WORKTREE/modules/$SUBMOD" \
+                "$SUBMOD/.git"
+
+            git submodule update --init --recursive "$SUBMOD"
+        fi
+    ) || return 1
+
+    cd "$workspace" || return 1
+}
+
+cleanup_worktrees() {
+    force=0
+    if [ "${1:-}" = "--force" ]; then
+        force=1
+    elif [ -n "${1:-}" ]; then
+        usage
+        return 1
+    fi
+
+    # Determine the ref to compare against for "merged into main".
+    main_ref=""
+    for candidate in main origin/main; do
+        if git show-ref --verify --quiet "refs/heads/$candidate" \
+            || git show-ref --verify --quiet "refs/remotes/$candidate"; then
+            main_ref="$candidate"
+            break
+        fi
+    done
+
+    if [ -z "$main_ref" ]; then
+        echo "Could not find a 'main' branch to compare against." >&2
+        return 1
+    fi
+
+    main_path=$(git rev-parse --show-toplevel)
+
+    # Collect worktrees whose branch has been merged into main.
+    # merged_squash holds "1" for branches detected as merged via gh but which
+    # are NOT ancestors of main (likely squash merges), "0" otherwise.
+    merged_paths=""
+    merged_branches=""
+    merged_squash=""
+    cur_path=""
+    cur_branch=""
+
+    # is_merged <branch>
+    #
+    # Returns 0 if the branch is considered merged into main, 1 otherwise.
+    # Sets the global LAST_MERGE_SQUASH to 1 when the branch is merged according
+    # to gh but is NOT a git ancestor of main (i.e. likely squash-merged), 0
+    # otherwise. gh failures (missing binary, no network, repo not on GitHub)
+    # never abort cleanup: detection falls back to the git ancestor check only.
+    is_merged() {
+        branch="$1"
+        LAST_MERGE_SQUASH=0
+
+        is_ancestor=1
+        if git merge-base --is-ancestor "refs/heads/$branch" "$main_ref" 2>/dev/null; then
+            is_ancestor=0
+        fi
+
+        gh_merged=1
+        if command -v gh >/dev/null 2>&1; then
+            pr=$(gh pr list --head "$branch" --state merged \
+                --json number --jq '.[0].number' 2>/dev/null)
+            if [ -n "$pr" ]; then
+                gh_merged=0
             fi
         fi
 
-        # Set up the submodule for libhimmelblau.
-        SUBMOD=authd-oidc-brokers/third_party/libhimmelblau
-        WORKTREE=$(basename "$(git rev-parse --show-toplevel)")
-        MAINREPO="$(git rev-parse --show-toplevel | xargs -I{} dirname {})/authd"
+        if [ "$is_ancestor" -eq 0 ]; then
+            return 0
+        fi
 
-        rm -rf \
-            "$MAINREPO/.git/worktrees/$WORKTREE/modules/$SUBMOD" \
-            "$SUBMOD/.git"
+        if [ "$gh_merged" -eq 0 ]; then
+            LAST_MERGE_SQUASH=1
+            return 0
+        fi
 
-        git submodule update --init --recursive "$SUBMOD"
+        return 1
+    }
+
+    parse_worktree() {
+        # $1 = path, $2 = branch (may be empty)
+        path="$1"
+        branch="$2"
+
+        [ -z "$path" ] && return 0
+        # Never remove the main worktree.
+        [ "$path" = "$main_path" ] && return 0
+        # Skip detached or unknown branches.
+        [ -z "$branch" ] && return 0
+        # Skip the main branch itself.
+        [ "$branch" = "$main_ref" ] && return 0
+
+        # Skip worktrees with uncommitted changes; warn so they aren't silently
+        # ignored.
+        if [ -n "$(git -C "$path" status --porcelain 2>/dev/null)" ]; then
+            echo "Skipping $path ($branch): uncommitted changes." >&2
+            return 0
+        fi
+
+        if is_merged "$branch"; then
+            merged_paths="$merged_paths$path
+"
+            merged_branches="$merged_branches$branch
+"
+            merged_squash="$merged_squash$LAST_MERGE_SQUASH
+"
+        fi
+    }
+
+    while IFS= read -r line; do
+        case "$line" in
+            "worktree "*)
+                cur_path="${line#worktree }"
+                cur_branch=""
+                ;;
+            "branch refs/heads/"*)
+                cur_branch="${line#branch refs/heads/}"
+                ;;
+            "")
+                parse_worktree "$cur_path" "$cur_branch"
+                cur_path=""
+                cur_branch=""
+                ;;
+        esac
+    done <<EOF
+$(git worktree list --porcelain)
+
+EOF
+
+    if [ -z "$merged_paths" ]; then
+        echo "No worktrees merged into $main_ref to clean up."
+        return 0
     fi
-) || return 1
 
-cd "$workspace" || return 1
+    echo "The following worktrees have been merged into $main_ref and will be removed."
+    echo "Their local branches will also be force-deleted (git branch -D)."
+    echo
+    echo "Entries marked [squash-merged] are not ancestors of $main_ref, so any"
+    echo "commits unique to those branches will be lost when the branch is deleted."
+    echo
+    # Print branch / path pairs, annotating squash merges.
+    i=1
+    echo "$merged_paths" | while IFS= read -r p; do
+        [ -z "$p" ] && continue
+        b=$(echo "$merged_branches" | sed -n "${i}p")
+        s=$(echo "$merged_squash" | sed -n "${i}p")
+        if [ "$s" = "1" ]; then
+            echo "  $b -> $p  [squash-merged: not an ancestor of $main_ref]"
+        else
+            echo "  $b -> $p"
+        fi
+        i=$((i + 1))
+    done
+    echo
+
+    if [ "$force" -ne 1 ]; then
+        printf "Remove these worktrees, their directories, and branches? [y/N] "
+        read -r answer
+        case "$answer" in
+            [yY] | [yY][eE][sS]) ;;
+            *)
+                echo "Aborted."
+                return 1
+                ;;
+        esac
+    fi
+
+    i=1
+    echo "$merged_paths" | while IFS= read -r p; do
+        [ -z "$p" ] && continue
+        b=$(echo "$merged_branches" | sed -n "${i}p")
+        i=$((i + 1))
+        echo "Removing $p"
+        if ! git worktree remove --force "$p"; then
+            rm -rf "$p"
+            # Prune stale metadata so the branch can be deleted below.
+            git worktree prune
+        fi
+        # Ensure the directory is gone.
+        rm -rf "$p"
+        if [ -n "$b" ]; then
+            echo "Deleting branch $b"
+            git branch -D "$b"
+        fi
+    done
+
+    git worktree prune
+}
+
+if [ "$#" -lt 1 ]; then
+    usage
+    return 1 2>/dev/null || exit 1
+fi
+
+case "$1" in
+    --cleanup)
+        shift
+        cleanup_worktrees "$@"
+        ;;
+    -h | --help)
+        usage
+        ;;
+    -*)
+        usage
+        return 1 2>/dev/null || exit 1
+        ;;
+    *)
+        if [ "$#" -ne 1 ]; then
+            usage
+            return 1 2>/dev/null || exit 1
+        fi
+        create_worktree "$1"
+        ;;
+esac
