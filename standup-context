@@ -18,6 +18,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import urllib.error
 import urllib.parse
@@ -557,6 +558,7 @@ def main():
 
     activity_text = buf.getvalue()
     print(activity_text, end="")
+    sys.stdout.flush()  # ensure activity text is flushed before copilot output begins
 
     date_str = datetime.now(STANDUP_TZ).strftime("%Y-%m-%d")
     out_path = Path.home() / "Documents" / "standups" / f"{date_str}.md"
