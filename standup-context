@@ -11,9 +11,12 @@ Override the cutoff with: STANDUP_SINCE=2026-06-27T12:30:00Z ./standup-context
 """
 
 import argparse
+import contextlib
+import io
 import json
 import os
 import subprocess
+import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -74,6 +77,28 @@ def fetch_pr_info(repo, num):
         return (repo, num), ("(unknown)", "")
 
 
+def run_standup_copilot(activity_text, out_path):
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".txt", prefix="standup-activity-", delete=False
+    ) as f:
+        f.write(activity_text)
+        tmp_path = Path(f.name)
+    try:
+        prompt = (
+            f"Read the file at {tmp_path}. It contains my GitHub activity since the last standup. "
+            f"Write a concise standup summary in Markdown to {out_path}, creating the directory if needed. "
+            "Group related work by theme. Note what was accomplished and what is in progress. "
+            "Highlight any issues or blockers raised. Keep it readable in under a minute. "
+            "Start with a '# Standup YYYY-MM-DD' heading."
+        )
+        subprocess.run(
+            ["copilot", "-p", prompt, "--yolo", "--output-format", "text"],
+            check=True,
+        )
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -91,11 +116,6 @@ def main():
         ["gh", "api", "/user", "--jq", ".login"], capture_output=True, text=True, check=True
     ).stdout.strip()
 
-    print(f"GitHub activity for @{github_user}")
-    print(f"Since: {since}")
-    print(f"Generated: {datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}")
-    print()
-
     all_events = json.loads(subprocess.run(
         ["gh", "api", f"/users/{github_user}/events?per_page=100"],
         capture_output=True, text=True, check=True,
@@ -103,31 +123,20 @@ def main():
 
     events = [e for e in all_events if e.get("created_at", "") >= since]
 
-    # Warn if we may have hit the 100-event cap and could be missing data
-    oldest = min((e["created_at"] for e in all_events), default="")
-    if len(all_events) == 100 and oldest > since:
-        print("⚠️  Warning: 100-event API cap reached; activity before", oldest[:16], "UTC may be missing.")
-        print()
-
-    if not events:
-        print("No GitHub activity found since the last standup.")
-        return
-
-    # Collect unique PR (repo, number) pairs whose title+body need fetching
-    # (the Events API omits PR titles/bodies in PullRequest* payloads)
-    pr_keys = set()
-    for e in events:
-        if e["type"] in ("PullRequestEvent", "PullRequestReviewEvent", "PullRequestReviewCommentEvent"):
-            num = e["payload"].get("number") or e["payload"].get("pull_request", {}).get("number")
-            if num:
-                pr_keys.add((e["repo"]["name"], num))
-
-    pr_cache = {}  # (repo, num) -> (title, body)
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        for key, info in (f.result() for f in as_completed(
-            pool.submit(fetch_pr_info, repo, num) for repo, num in pr_keys
-        )):
-            pr_cache[key] = info
+    # Fetch PR title+body in parallel (Events API omits them in PullRequest* payloads)
+    pr_cache = {}
+    if events:
+        pr_keys = set()
+        for e in events:
+            if e["type"] in ("PullRequestEvent", "PullRequestReviewEvent", "PullRequestReviewCommentEvent"):
+                num = e["payload"].get("number") or e["payload"].get("pull_request", {}).get("number")
+                if num:
+                    pr_keys.add((e["repo"]["name"], num))
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            for key, info in (f.result() for f in as_completed(
+                pool.submit(fetch_pr_info, repo, num) for repo, num in pr_keys
+            )):
+                pr_cache[key] = info
 
     def pr_title(repo, num):
         return pr_cache.get((repo, num), ("(unknown)", ""))[0]
@@ -135,130 +144,159 @@ def main():
     def pr_body(repo, num):
         return pr_cache.get((repo, num), ("(unknown)", ""))[1]
 
-    # --- PRs Opened ---
-    opened_prs = [
-        (e["created_at"], e["repo"]["name"], e["payload"]["number"])
-        for e in events
-        if e["type"] == "PullRequestEvent" and e["payload"].get("action") == "opened"
-    ]
-    if opened_prs:
-        print("### PRs Opened")
-        for ts, repo, num in sorted(opened_prs):
-            print(f"  - {repo}#{num}: {pr_title(repo, num)} [{fmt(ts)}]")
-            body = pr_body(repo, num)
-            if body:
-                print(indent(body))
+    # Capture all activity output so we can pass it to copilot
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        print(f"GitHub activity for @{github_user}")
+        print(f"Since: {since}")
+        print(f"Generated: {datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}")
         print()
 
-    # --- PRs Reviewed ---
-    # Deduplicate per (repo, PR number); prefer 'approved' over 'commented'
-    reviews = {}
-    for e in events:
-        if e["type"] == "PullRequestReviewEvent":
-            pr = e["payload"].get("pull_request", {})
-            rev = e["payload"].get("review", {})
-            repo = e["repo"]["name"]
-            num = pr.get("number")
-            state = rev.get("state", "commented").lower()
-            body = (rev.get("body") or "").strip()
-            key = (repo, num)
-            if key not in reviews or state == "approved":
-                reviews[key] = (e["created_at"], repo, num, state, body)
-    if reviews:
-        print("### PRs Reviewed")
-        for _, (ts, repo, num, state, body) in sorted(reviews.items()):
-            print(f"  - [{state}] {repo}#{num}: {pr_title(repo, num)} [{fmt(ts)}]")
-            if body:
-                print(indent(body))
-        print()
+        oldest = min((e["created_at"] for e in all_events), default="")
+        if len(all_events) == 100 and oldest > since:
+            print("⚠️  Warning: 100-event API cap reached; activity before", oldest[:16], "UTC may be missing.")
+            print()
 
-    # --- PR Review Comments (inline) ---
-    review_comments = [
-        (
-            e["created_at"],
-            e["repo"]["name"],
-            e["payload"].get("pull_request", {}).get("number"),
-            e["payload"].get("comment", {}).get("path", ""),
-            (e["payload"].get("comment", {}).get("body") or "").strip(),
-        )
-        for e in events
-        if e["type"] == "PullRequestReviewCommentEvent" and e["payload"].get("action") == "created"
-    ]
-    if review_comments:
-        print("### PR Review Comments (inline)")
-        for ts, repo, num, path, body in sorted(review_comments):
-            print(f"  - {repo}#{num} {path} [{fmt(ts)}]")
-            if body:
-                print(indent(body))
-        print()
+        if not events:
+            print("No GitHub activity found since the last standup.")
+        else:
+            # --- PRs Opened ---
+            opened_prs = [
+                (e["created_at"], e["repo"]["name"], e["payload"]["number"])
+                for e in events
+                if e["type"] == "PullRequestEvent" and e["payload"].get("action") == "opened"
+            ]
+            if opened_prs:
+                print("### PRs Opened")
+                for ts, repo, num in sorted(opened_prs):
+                    print(f"  - {repo}#{num}: {pr_title(repo, num)} [{fmt(ts)}]")
+                    body = pr_body(repo, num)
+                    if body:
+                        print(indent(body))
+                print()
 
-    # --- Issues Opened ---
-    opened_issues = [
-        (
-            e["created_at"],
-            e["repo"]["name"],
-            e["payload"].get("issue", {}).get("number"),
-            e["payload"].get("issue", {}).get("title", "(unknown)"),
-            (e["payload"].get("issue", {}).get("body") or "").strip(),
-        )
-        for e in events
-        if e["type"] == "IssuesEvent" and e["payload"].get("action") == "opened"
-    ]
-    if opened_issues:
-        print("### Issues Opened")
-        for ts, repo, num, title, body in sorted(opened_issues):
-            print(f"  - {repo}#{num}: {title} [{fmt(ts)}]")
-            if body:
-                print(indent(body))
-        print()
+            # --- PRs Reviewed ---
+            # Deduplicate per (repo, PR number); prefer 'approved' over 'commented'
+            reviews = {}
+            for e in events:
+                if e["type"] == "PullRequestReviewEvent":
+                    pr = e["payload"].get("pull_request", {})
+                    rev = e["payload"].get("review", {})
+                    repo = e["repo"]["name"]
+                    num = pr.get("number")
+                    state = rev.get("state", "commented").lower()
+                    body = (rev.get("body") or "").strip()
+                    key = (repo, num)
+                    if key not in reviews or state == "approved":
+                        reviews[key] = (e["created_at"], repo, num, state, body)
+            if reviews:
+                print("### PRs Reviewed")
+                for _, (ts, repo, num, state, body) in sorted(reviews.items()):
+                    print(f"  - [{state}] {repo}#{num}: {pr_title(repo, num)} [{fmt(ts)}]")
+                    if body:
+                        print(indent(body))
+                print()
 
-    # --- Commits Pushed ---
-    pushes = []
-    seen_shas = set()
-    for e in events:
-        if e["type"] == "PushEvent":
-            p = e["payload"]
-            ref = p.get("ref", "").replace("refs/heads/", "")
-            repo = e["repo"]["name"]
-            ts = e["created_at"]
-            for c in p.get("commits", []):
-                sha = c.get("sha", "")[:8]
-                if sha and sha not in seen_shas:
-                    seen_shas.add(sha)
-                    msg = c.get("message", "")
-                    pushes.append((ts, repo, ref, sha, msg))
-    if pushes:
-        print("### Commits Pushed")
-        for ts, repo, ref, sha, msg in sorted(pushes):
-            lines = msg.strip().splitlines()
-            print(f"  - {repo} ({ref}) {sha}: {lines[0] if lines else ''} [{fmt(ts)}]")
-            rest = "\n".join(lines[1:]).strip()
-            if rest:
-                print(indent(rest))
-        print()
+            # --- PR Review Comments (inline) ---
+            review_comments = [
+                (
+                    e["created_at"],
+                    e["repo"]["name"],
+                    e["payload"].get("pull_request", {}).get("number"),
+                    e["payload"].get("comment", {}).get("path", ""),
+                    (e["payload"].get("comment", {}).get("body") or "").strip(),
+                )
+                for e in events
+                if e["type"] == "PullRequestReviewCommentEvent" and e["payload"].get("action") == "created"
+            ]
+            if review_comments:
+                print("### PR Review Comments (inline)")
+                for ts, repo, num, path, body in sorted(review_comments):
+                    print(f"  - {repo}#{num} {path} [{fmt(ts)}]")
+                    if body:
+                        print(indent(body))
+                print()
 
-    # --- Issue/PR Comments ---
-    comments = [
-        (
-            e["created_at"],
-            e["repo"]["name"],
-            e["payload"].get("issue", {}).get("number"),
-            e["payload"].get("issue", {}).get("title", "(unknown)"),
-            (e["payload"].get("comment", {}).get("body") or "").strip(),
-        )
-        for e in events
-        if e["type"] == "IssueCommentEvent" and e["payload"].get("action") == "created"
-    ]
-    if comments:
-        print("### Commented on Issues/PRs")
-        for ts, repo, num, title, body in sorted(comments):
-            print(f"  - {repo}#{num}: {title} [{fmt(ts)}]")
-            if body:
-                print(indent(body))
-        print()
+            # --- Issues Opened ---
+            opened_issues = [
+                (
+                    e["created_at"],
+                    e["repo"]["name"],
+                    e["payload"].get("issue", {}).get("number"),
+                    e["payload"].get("issue", {}).get("title", "(unknown)"),
+                    (e["payload"].get("issue", {}).get("body") or "").strip(),
+                )
+                for e in events
+                if e["type"] == "IssuesEvent" and e["payload"].get("action") == "opened"
+            ]
+            if opened_issues:
+                print("### Issues Opened")
+                for ts, repo, num, title, body in sorted(opened_issues):
+                    print(f"  - {repo}#{num}: {title} [{fmt(ts)}]")
+                    if body:
+                        print(indent(body))
+                print()
 
-    print("---")
-    print(f"Total events in window: {len(events)}")
+            # --- Commits Pushed ---
+            pushes = []
+            seen_shas = set()
+            for e in events:
+                if e["type"] == "PushEvent":
+                    p = e["payload"]
+                    ref = p.get("ref", "").replace("refs/heads/", "")
+                    repo = e["repo"]["name"]
+                    ts = e["created_at"]
+                    for c in p.get("commits", []):
+                        sha = c.get("sha", "")[:8]
+                        if sha and sha not in seen_shas:
+                            seen_shas.add(sha)
+                            msg = c.get("message", "")
+                            pushes.append((ts, repo, ref, sha, msg))
+            if pushes:
+                print("### Commits Pushed")
+                for ts, repo, ref, sha, msg in sorted(pushes):
+                    lines = msg.strip().splitlines()
+                    print(f"  - {repo} ({ref}) {sha}: {lines[0] if lines else ''} [{fmt(ts)}]")
+                    rest = "\n".join(lines[1:]).strip()
+                    if rest:
+                        print(indent(rest))
+                print()
+
+            # --- Issue/PR Comments ---
+            comments = [
+                (
+                    e["created_at"],
+                    e["repo"]["name"],
+                    e["payload"].get("issue", {}).get("number"),
+                    e["payload"].get("issue", {}).get("title", "(unknown)"),
+                    (e["payload"].get("comment", {}).get("body") or "").strip(),
+                )
+                for e in events
+                if e["type"] == "IssueCommentEvent" and e["payload"].get("action") == "created"
+            ]
+            if comments:
+                print("### Commented on Issues/PRs")
+                for ts, repo, num, title, body in sorted(comments):
+                    print(f"  - {repo}#{num}: {title} [{fmt(ts)}]")
+                    if body:
+                        print(indent(body))
+                print()
+
+            print("---")
+            print(f"Total events in window: {len(events)}")
+
+    activity_text = buf.getvalue()
+    print(activity_text, end="")
+
+    date_str = datetime.now(STANDUP_TZ).strftime("%Y-%m-%d")
+    out_path = Path.home() / "Documents" / "standups" / f"{date_str}.md"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    run_standup_copilot(activity_text, out_path)
+
+    subprocess.Popen(
+        ["flatpak", "run", "org.gnome.gitlab.somas.Apostrophe", "--", str(out_path)]
+    )
 
 
 if __name__ == "__main__":
