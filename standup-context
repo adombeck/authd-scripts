@@ -204,6 +204,11 @@ def first_name(login):
     return re.split(r'[-._\s]', login.strip())[0]
 
 
+def gh_url(repo, num, is_pr):
+    """Return the GitHub URL for a PR or issue."""
+    return f"https://github.com/{repo}/{'pull' if is_pr else 'issues'}/{num}"
+
+
 # ---------------------------------------------------------------------------
 # GitHub helpers
 # ---------------------------------------------------------------------------
@@ -233,25 +238,44 @@ def run_standup_copilot(activity_text, out_path):
             f"Read the file at {tmp_path}. It contains my GitHub and Jira activity since the last standup. "
             f"Write a standup summary in Markdown to {out_path}, creating the directory if needed. "
             "Start with a '# Standup YYYY-MM-DD' heading. "
-            "Then organise the content into ## sections matching the sprint board columns, "
+
+            "Structure the content into ## sections matching the sprint board columns, "
             "in the order we review them during standup (right to left): "
             "'## Done', '## In Review', '## In Progress', '## To Do'. "
             "Only include a column section if there is activity to report for it. "
             "Place each item under the column that matches its Jira status. "
             "Items with no Jira issue, or whose Jira issue is not on the sprint board, "
             "go in a final '## Other' section. "
-            "Within each column section, write one ### entry per item. "
-            "For the ### heading: if the item has a 'Jira:' annotation, use the Jira key and "
-            "Jira title, e.g. '### UDENG-1234: Jira title here'; otherwise use the GitHub "
-            "PR/issue number and title, e.g. '### #1234: Title here'. "
+
+            "Within each column section, write one ### entry per logical unit of work. "
+            "Grouping rules: "
+            "(a) If a GitHub issue and a PR that closes it were both active (look for "
+            "'Closes #N', 'Fixes #N', 'Resolves #N' in PR bodies), combine them into one ### entry "
+            "and link both. "
+            "(b) Multiple clearly related items (e.g. many new failures in the same test suite) "
+            "may be grouped under one ### entry with a summarising heading; in that case include "
+            "a bullet list inside the entry with a Markdown link for every individual item. "
+            "Otherwise give each item its own ### entry. "
+
+            "For the ### heading: if the item has a 'Jira:' annotation, use the Jira key as a "
+            "Markdown link and the Jira title, e.g. "
+            "'### [UDENG-1234](https://warthogs.atlassian.net/browse/UDENG-1234): Jira title'. "
+            "Otherwise use the GitHub number as a Markdown link and title, e.g. "
+            "'### [PR #123](url): Title' or '### [Issue #456](url): Title'. "
+            "Use the 'GitHub URL:' annotation for the GitHub link. "
             "If the item has '[assigned to: Name]', append that to the heading in parentheses, "
-            "e.g. '### UDENG-1234: Title (Alice's PR)'. "
+            "e.g. '… (Alice's PR)'. "
+            "For reviewed PRs add '(reviewed)' after the key/number. "
+            "For push-only entries use the branch name as the heading if no Jira key is present. "
+
+            "Always render Jira keys and GitHub PR/issue references as Markdown links. "
+            "Prefix GitHub issues with 'Issue' and pull requests with 'PR'. "
+
             "If an item is marked '[no Jira issue]', add '⚠️ No Jira issue' as a standalone line "
             "near the top of the entry body (after the first sentence). "
             "If an item is marked '[not on sprint board]', add '⚠️ Not on sprint board' as a "
             "standalone line near the top of the entry body (after the first sentence). "
-            "For reviewed PRs add '(reviewed)' after the key/number. "
-            "For push-only entries use the branch name as the heading if no Jira key is present. "
+
             "Under each ### heading write 1-3 sentences summarising what I did there — "
             "what changed, why, and current status. Do not repeat the title verbatim."
         )
@@ -363,12 +387,16 @@ def main():
             return
         for key, info in matches:
             referenced_keys.add(key)
+            jira_link = f"{JIRA_URL}/browse/{key}"
             if info:
                 on_board = sprint_keys is None or key in sprint_keys
                 board_note = "" if on_board else " [not on sprint board]"
-                print(f"    Jira: {key}: {info['summary']} ({info['status']}){board_note}")
+                print(f"    Jira: {key}: {info['summary']} ({info['status']}){board_note} — {jira_link}")
             else:
-                print(f"    Jira: {key} (details unavailable)")
+                print(f"    Jira: {key} (details unavailable) — {jira_link}")
+
+    def print_gh_url(repo, num, is_pr):
+        print(f"    GitHub URL: {gh_url(repo, num, is_pr)}")
 
     def print_assignee(asgn_login):
         if asgn_login and asgn_login != github_user:
@@ -402,7 +430,8 @@ def main():
                 for ts, repo, num in sorted(opened_prs):
                     t, b, asgn_login, head_ref = pr_info(repo, num)
                     jm = jira_matches_for([t, b, head_ref])
-                    print(f"  - {repo}#{num}: {t} [{fmt(ts)}]")
+                    print(f"  - PR {repo}#{num}: {t} [{fmt(ts)}]")
+                    print_gh_url(repo, num, True)
                     print_jira_annot(jm, github_referenced_jira_keys)
                     print_assignee(asgn_login)
                     if b:
@@ -428,7 +457,8 @@ def main():
                 for _, (ts, repo, num, state, body) in sorted(reviews.items()):
                     t, b, asgn_login, head_ref = pr_info(repo, num)
                     jm = jira_matches_for([t, b, head_ref])
-                    print(f"  - [{state}] {repo}#{num}: {t} [{fmt(ts)}]")
+                    print(f"  - PR {repo}#{num} [{state}]: {t} [{fmt(ts)}]")
+                    print_gh_url(repo, num, True)
                     print_jira_annot(jm, github_referenced_jira_keys)
                     print_assignee(asgn_login)
                     if body:
@@ -452,7 +482,8 @@ def main():
                 for ts, repo, num, path, body in sorted(review_comments):
                     t, b, asgn_login, head_ref = pr_info(repo, num)
                     jm = jira_matches_for([t, b, head_ref])
-                    print(f"  - {repo}#{num} {path} [{fmt(ts)}]")
+                    print(f"  - PR {repo}#{num} {path} [{fmt(ts)}]")
+                    print_gh_url(repo, num, True)
                     print_jira_annot(jm, github_referenced_jira_keys)
                     print_assignee(asgn_login)
                     if body:
@@ -476,7 +507,8 @@ def main():
                 print("### Issues Opened")
                 for ts, repo, num, title, body, asgn_login in sorted(opened_issues):
                     jm = jira_matches_for([title, body])
-                    print(f"  - {repo}#{num}: {title} [{fmt(ts)}]")
+                    print(f"  - Issue {repo}#{num}: {title} [{fmt(ts)}]")
+                    print_gh_url(repo, num, False)
                     print_jira_annot(jm, github_referenced_jira_keys)
                     print_assignee(asgn_login)
                     if body:
@@ -524,15 +556,18 @@ def main():
                     e["payload"].get("issue", {}).get("title", "(unknown)"),
                     (e["payload"].get("comment", {}).get("body") or "").strip(),
                     (e["payload"].get("issue", {}).get("assignee") or {}).get("login", ""),
+                    bool(e["payload"].get("issue", {}).get("pull_request")),
                 )
                 for e in events
                 if e["type"] == "IssueCommentEvent" and e["payload"].get("action") == "created"
             ]
             if comments:
                 print("### Commented on Issues/PRs")
-                for ts, repo, num, title, body, asgn_login in sorted(comments):
+                for ts, repo, num, title, body, asgn_login, is_pr in sorted(comments):
                     jm = jira_matches_for([title, body])
-                    print(f"  - {repo}#{num}: {title} [{fmt(ts)}]")
+                    kind = "PR" if is_pr else "Issue"
+                    print(f"  - {kind} {repo}#{num}: {title} [{fmt(ts)}]")
+                    print_gh_url(repo, num, is_pr)
                     print_jira_annot(jm, github_referenced_jira_keys)
                     print_assignee(asgn_login)
                     if body:
@@ -546,7 +581,8 @@ def main():
                 for key, info in sorted(jira_only.items()):
                     on_board = sprint_keys is None or key in sprint_keys
                     board_note = "" if on_board else " [not on sprint board]"
-                    print(f"  - {key}: {info['summary']} ({info['status']}){board_note}")
+                    jira_link = f"{JIRA_URL}/browse/{key}"
+                    print(f"  - {key}: {info['summary']} ({info['status']}){board_note} — {jira_link}")
                 print()
 
             print("---")
