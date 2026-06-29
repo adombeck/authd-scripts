@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 standup-context
-Outputs structured GitHub activity since the last daily standup (Mon-Fri 14:30 Berlin).
+Outputs structured GitHub + Jira activity since the last daily standup (Mon-Fri 14:30 Berlin).
 
 Usage:
   standup-context            – print activity since last standup
@@ -11,12 +11,17 @@ Override the cutoff with: STANDUP_SINCE=2026-06-27T12:30:00Z ./standup-context
 """
 
 import argparse
+import base64
 import contextlib
 import io
 import json
 import os
+import re
 import subprocess
 import tempfile
+import urllib.error
+import urllib.parse
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -24,6 +29,9 @@ from zoneinfo import ZoneInfo
 
 STANDUP_TZ = ZoneInfo("Europe/Berlin")
 STANDUP_CUTOFF_TIME = (14, 30)  # hour, minute local Berlin time
+
+JIRA_URL = "https://warthogs.atlassian.net"
+JIRA_KEY_RE = re.compile(r'\b([A-Z]{2,10}-\d+)\b')
 
 
 def install_timer():
@@ -65,16 +73,152 @@ def indent(text, prefix="    "):
     return "\n".join(prefix + line for line in text.strip().splitlines())
 
 
+# ---------------------------------------------------------------------------
+# Jira helpers
+# ---------------------------------------------------------------------------
+
+def load_jira_credentials():
+    """Load credentials from ~/.jira_credentials (simple key: value format)."""
+    creds = {}
+    path = Path.home() / ".jira_credentials"
+    if not path.exists():
+        return {}
+    for line in path.read_text().splitlines():
+        if ': ' in line:
+            key, _, val = line.partition(': ')
+            creds[key.strip()] = val.strip().strip('"')
+    return creds
+
+
+def jira_request(path, creds):
+    """Make a Jira REST API GET request; returns parsed JSON or None on error."""
+    if not creds:
+        return None
+    token = base64.b64encode(f"{creds['user']}:{creds['token']}".encode()).decode()
+    req = urllib.request.Request(
+        f"{JIRA_URL}{path}",
+        headers={"Authorization": f"Basic {token}", "Accept": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return json.loads(resp.read())
+    except Exception:
+        return None
+
+
+def find_jira_keys(text):
+    """Return list of Jira issue keys found in text."""
+    return JIRA_KEY_RE.findall(text or "")
+
+
+def fetch_jira_activity(creds, since_iso):
+    """Return {key: {summary, status}} for issues assigned to current user updated since given time."""
+    if not creds:
+        return {}
+    dt = datetime.fromisoformat(since_iso.replace("Z", "+00:00"))
+    jql_since = dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M")
+    jql = f'assignee = currentUser() AND updated >= "{jql_since}" ORDER BY updated DESC'
+    path = "/rest/api/3/search?" + urllib.parse.urlencode({
+        "jql": jql, "fields": "summary,status", "maxResults": "50",
+    })
+    result = jira_request(path, creds)
+    if not result:
+        return {}
+    return {
+        issue["key"]: {
+            "summary": issue["fields"]["summary"],
+            "status": issue["fields"]["status"]["name"],
+        }
+        for issue in result.get("issues", [])
+    }
+
+
+def fetch_sprint_issue_keys(creds):
+    """Return the set of issue keys in the active sprint for the configured board.
+
+    Returns None if the board info is unavailable (so callers can distinguish
+    "not on board" from "couldn't check").
+    """
+    if not creds or "board_id" not in creds:
+        return None
+    board_id = creds["board_id"]
+
+    sprints = jira_request(f"/rest/agile/1.0/board/{board_id}/sprint?state=active", creds)
+    if not sprints or not sprints.get("values"):
+        return None
+    sprint_id = sprints["values"][0]["id"]
+
+    keys = set()
+    start = 0
+    while True:
+        result = jira_request(
+            f"/rest/agile/1.0/sprint/{sprint_id}/issue?"
+            + urllib.parse.urlencode({"fields": "key", "startAt": start, "maxResults": 100}),
+            creds,
+        )
+        if not result:
+            break
+        issues = result.get("issues", [])
+        if not issues:
+            break
+        for issue in issues:
+            keys.add(issue["key"])
+        start += len(issues)
+        if start >= result.get("total", 0):
+            break
+    return keys
+
+
+def _fetch_one_jira_issue(key, creds):
+    path = "/rest/api/3/issue/" + urllib.parse.quote(key) + "?" + urllib.parse.urlencode(
+        {"fields": "summary,status"}
+    )
+    result = jira_request(path, creds)
+    if not result:
+        return key, None
+    return key, {
+        "summary": result["fields"]["summary"],
+        "status": result["fields"]["status"]["name"],
+    }
+
+
+def fetch_jira_issues_by_keys(keys, creds, existing_cache):
+    """Fetch Jira issues for keys not already in existing_cache. Returns merged cache."""
+    cache = dict(existing_cache)
+    missing = [k for k in keys if k not in cache]
+    if not missing or not creds:
+        return cache
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        for key, info in (f.result() for f in as_completed(
+            pool.submit(_fetch_one_jira_issue, k, creds) for k in missing
+        )):
+            cache[key] = info
+    return cache
+
+
+def first_name(login):
+    """Extract a first-name-like string from a GitHub login or display name."""
+    if not login:
+        return ""
+    return re.split(r'[-._\s]', login.strip())[0]
+
+
+# ---------------------------------------------------------------------------
+# GitHub helpers
+# ---------------------------------------------------------------------------
+
+
 def fetch_pr_info(repo, num):
     try:
         result = subprocess.run(
-            ["gh", "api", f"/repos/{repo}/pulls/{num}", "--jq", "[.title, (.body // \"\")]"],
+            ["gh", "api", f"/repos/{repo}/pulls/{num}", "--jq",
+             "[.title, (.body // \"\"), (.assignee.login // \"\"), (.head.ref // \"\")]"],
             capture_output=True, text=True, timeout=10,
         )
-        title, body = json.loads(result.stdout.strip())
-        return (repo, num), (title or "(unknown)", body or "")
+        title, body, asgn_login, head_ref = json.loads(result.stdout.strip())
+        return (repo, num), (title or "(unknown)", body or "", asgn_login or "", head_ref or "")
     except Exception:
-        return (repo, num), ("(unknown)", "")
+        return (repo, num), ("(unknown)", "", "", "")
 
 
 def run_standup_copilot(activity_text, out_path):
@@ -85,18 +229,24 @@ def run_standup_copilot(activity_text, out_path):
         tmp_path = Path(f.name)
     try:
         prompt = (
-            f"Read the file at {tmp_path}. It contains my GitHub activity since the last standup. "
+            f"Read the file at {tmp_path}. It contains my GitHub and Jira activity since the last standup. "
             f"Write a standup summary in Markdown to {out_path}, creating the directory if needed. "
             "Start with a '# Standup YYYY-MM-DD' heading. "
             "Then write one ## section per item in this order: "
             "(1) each PR I opened, "
             "(2) each PR I reviewed, "
             "(3) each issue I opened, "
-            "(4) each PR or branch I pushed commits to (but did not open in this period). "
-            "Use the PR/issue title as the section heading, prefixed with its number, "
-            "e.g. '## #1234: Title here'. "
-            "For reviewed PRs add '(reviewed)' after the number. "
-            "For push-only entries use the branch name as the heading. "
+            "(4) each PR or branch I pushed commits to (but did not open in this period), "
+            "(5) any Jira issues with no associated GitHub activity. "
+            "For the ## section heading: if the item has a 'Jira:' annotation, use the Jira key and "
+            "Jira title, e.g. '## UDENG-1234: Jira title here'; otherwise use the GitHub PR/issue "
+            "number and title, e.g. '## #1234: Title here'. "
+            "If the item has '[assigned to: Name]', append that to the heading in parentheses, "
+            "e.g. '## UDENG-1234: Title (Alice's PR)'. "
+            "If an item is marked '[no Jira issue]', add a short italic note at the end of the section. "
+            "If an item is marked '[not on sprint board]', add a short italic note at the end of the section. "
+            "For reviewed PRs add '(reviewed)' after the key/number. "
+            "For push-only entries use the branch name as the heading if no Jira key is present. "
             "Under each heading write 1-3 sentences summarising what I did there — "
             "what changed, why, and current status. Do not repeat the title verbatim."
         )
@@ -132,7 +282,7 @@ def main():
 
     events = [e for e in all_events if e.get("created_at", "") >= since]
 
-    # Fetch PR title+body in parallel (Events API omits them in PullRequest* payloads)
+    # Fetch PR title/body/assignee/head-ref in parallel
     pr_cache = {}
     if events:
         pr_keys = set()
@@ -147,16 +297,82 @@ def main():
             )):
                 pr_cache[key] = info
 
-    def pr_title(repo, num):
-        return pr_cache.get((repo, num), ("(unknown)", ""))[0]
+    def pr_info(repo, num):
+        return pr_cache.get((repo, num), ("(unknown)", "", "", ""))
 
-    def pr_body(repo, num):
-        return pr_cache.get((repo, num), ("(unknown)", ""))[1]
+    # Load Jira credentials; fetch Jira activity and sprint board keys in parallel
+    jira_creds = load_jira_credentials()
+    jira_activity = {}
+    sprint_keys = None  # None = "couldn't determine"; set = known sprint contents
+    if jira_creds:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            activity_fut = pool.submit(fetch_jira_activity, jira_creds, since)
+            sprint_fut = pool.submit(fetch_sprint_issue_keys, jira_creds)
+            jira_activity = activity_fut.result()
+            sprint_keys = sprint_fut.result()
 
-    # Capture all activity output so we can pass it to copilot
+    # Collect every Jira key referenced across all GitHub activity
+    all_jira_keys = set(jira_activity.keys())
+    for e in events:
+        p = e["payload"]
+        if e["type"] in ("PullRequestEvent", "PullRequestReviewEvent", "PullRequestReviewCommentEvent"):
+            num = p.get("number") or p.get("pull_request", {}).get("number")
+            if num:
+                t, b, _, head_ref = pr_info(e["repo"]["name"], num)
+                all_jira_keys.update(find_jira_keys(t))
+                all_jira_keys.update(find_jira_keys(b))
+                all_jira_keys.update(find_jira_keys(head_ref))
+        elif e["type"] in ("IssuesEvent", "IssueCommentEvent"):
+            issue = p.get("issue", {})
+            all_jira_keys.update(find_jira_keys(issue.get("title", "")))
+            all_jira_keys.update(find_jira_keys(issue.get("body") or ""))
+        elif e["type"] == "PushEvent":
+            ref = p.get("ref", "").replace("refs/heads/", "")
+            all_jira_keys.update(find_jira_keys(ref))
+            for c in p.get("commits", []):
+                all_jira_keys.update(find_jira_keys(c.get("message", "")))
+
+    # Fetch any Jira issues not already loaded from the activity query
+    jira_cache = fetch_jira_issues_by_keys(all_jira_keys, jira_creds, jira_activity)
+
+    # -----------------------------------------------------------------------
+    # Output helpers (defined here to close over github_user, jira_cache, sprint_keys)
+    # -----------------------------------------------------------------------
+
+    def jira_matches_for(texts):
+        """Return list of (key, info_or_none) for unique Jira keys found in texts."""
+        seen = []
+        result = []
+        for text in texts:
+            for key in find_jira_keys(text or ""):
+                if key not in seen:
+                    seen.append(key)
+                    result.append((key, jira_cache.get(key)))
+        return result
+
+    def print_jira_annot(matches, referenced_keys):
+        """Print Jira annotation lines; update referenced_keys in place."""
+        if not matches:
+            print("    [no Jira issue]")
+            return
+        for key, info in matches:
+            referenced_keys.add(key)
+            if info:
+                on_board = sprint_keys is None or key in sprint_keys
+                board_note = "" if on_board else " [not on sprint board]"
+                print(f"    Jira: {key}: {info['summary']} ({info['status']}){board_note}")
+            else:
+                print(f"    Jira: {key} (details unavailable)")
+
+    def print_assignee(asgn_login):
+        if asgn_login and asgn_login != github_user:
+            print(f"    [assigned to: {first_name(asgn_login)}]")
+
+    # Capture all output so we can pass it to copilot
     buf = io.StringIO()
+    github_referenced_jira_keys = set()
     with contextlib.redirect_stdout(buf):
-        print(f"GitHub activity for @{github_user}")
+        print(f"GitHub + Jira activity for @{github_user}")
         print(f"Since: {since}")
         print(f"Generated: {datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}")
         print()
@@ -166,8 +382,8 @@ def main():
             print("⚠️  Warning: 100-event API cap reached; activity before", oldest[:16], "UTC may be missing.")
             print()
 
-        if not events:
-            print("No GitHub activity found since the last standup.")
+        if not events and not jira_activity:
+            print("No activity found since the last standup.")
         else:
             # --- PRs Opened ---
             opened_prs = [
@@ -178,10 +394,13 @@ def main():
             if opened_prs:
                 print("### PRs Opened")
                 for ts, repo, num in sorted(opened_prs):
-                    print(f"  - {repo}#{num}: {pr_title(repo, num)} [{fmt(ts)}]")
-                    body = pr_body(repo, num)
-                    if body:
-                        print(indent(body))
+                    t, b, asgn_login, head_ref = pr_info(repo, num)
+                    jm = jira_matches_for([t, b, head_ref])
+                    print(f"  - {repo}#{num}: {t} [{fmt(ts)}]")
+                    print_jira_annot(jm, github_referenced_jira_keys)
+                    print_assignee(asgn_login)
+                    if b:
+                        print(indent(b))
                 print()
 
             # --- PRs Reviewed ---
@@ -201,7 +420,11 @@ def main():
             if reviews:
                 print("### PRs Reviewed")
                 for _, (ts, repo, num, state, body) in sorted(reviews.items()):
-                    print(f"  - [{state}] {repo}#{num}: {pr_title(repo, num)} [{fmt(ts)}]")
+                    t, b, asgn_login, head_ref = pr_info(repo, num)
+                    jm = jira_matches_for([t, b, head_ref])
+                    print(f"  - [{state}] {repo}#{num}: {t} [{fmt(ts)}]")
+                    print_jira_annot(jm, github_referenced_jira_keys)
+                    print_assignee(asgn_login)
                     if body:
                         print(indent(body))
                 print()
@@ -221,7 +444,11 @@ def main():
             if review_comments:
                 print("### PR Review Comments (inline)")
                 for ts, repo, num, path, body in sorted(review_comments):
+                    t, b, asgn_login, head_ref = pr_info(repo, num)
+                    jm = jira_matches_for([t, b, head_ref])
                     print(f"  - {repo}#{num} {path} [{fmt(ts)}]")
+                    print_jira_annot(jm, github_referenced_jira_keys)
+                    print_assignee(asgn_login)
                     if body:
                         print(indent(body))
                 print()
@@ -234,14 +461,18 @@ def main():
                     e["payload"].get("issue", {}).get("number"),
                     e["payload"].get("issue", {}).get("title", "(unknown)"),
                     (e["payload"].get("issue", {}).get("body") or "").strip(),
+                    (e["payload"].get("issue", {}).get("assignee") or {}).get("login", ""),
                 )
                 for e in events
                 if e["type"] == "IssuesEvent" and e["payload"].get("action") == "opened"
             ]
             if opened_issues:
                 print("### Issues Opened")
-                for ts, repo, num, title, body in sorted(opened_issues):
+                for ts, repo, num, title, body, asgn_login in sorted(opened_issues):
+                    jm = jira_matches_for([title, body])
                     print(f"  - {repo}#{num}: {title} [{fmt(ts)}]")
+                    print_jira_annot(jm, github_referenced_jira_keys)
+                    print_assignee(asgn_login)
                     if body:
                         print(indent(body))
                 print()
@@ -263,9 +494,16 @@ def main():
                             pushes.append((ts, repo, ref, sha, msg))
             if pushes:
                 print("### Commits Pushed")
+                # Group by (repo, ref) to emit one Jira annotation per branch
+                seen_branch_jira = set()
                 for ts, repo, ref, sha, msg in sorted(pushes):
+                    branch_key = (repo, ref)
                     lines = msg.strip().splitlines()
                     print(f"  - {repo} ({ref}) {sha}: {lines[0] if lines else ''} [{fmt(ts)}]")
+                    if branch_key not in seen_branch_jira:
+                        seen_branch_jira.add(branch_key)
+                        jm = jira_matches_for([ref] + lines)
+                        print_jira_annot(jm, github_referenced_jira_keys)
                     rest = "\n".join(lines[1:]).strip()
                     if rest:
                         print(indent(rest))
@@ -279,20 +517,38 @@ def main():
                     e["payload"].get("issue", {}).get("number"),
                     e["payload"].get("issue", {}).get("title", "(unknown)"),
                     (e["payload"].get("comment", {}).get("body") or "").strip(),
+                    (e["payload"].get("issue", {}).get("assignee") or {}).get("login", ""),
                 )
                 for e in events
                 if e["type"] == "IssueCommentEvent" and e["payload"].get("action") == "created"
             ]
             if comments:
                 print("### Commented on Issues/PRs")
-                for ts, repo, num, title, body in sorted(comments):
+                for ts, repo, num, title, body, asgn_login in sorted(comments):
+                    jm = jira_matches_for([title, body])
                     print(f"  - {repo}#{num}: {title} [{fmt(ts)}]")
+                    print_jira_annot(jm, github_referenced_jira_keys)
+                    print_assignee(asgn_login)
                     if body:
                         print(indent(body))
                 print()
 
+            # --- Jira-only activity (no corresponding GitHub events) ---
+            jira_only = {k: v for k, v in jira_activity.items() if k not in github_referenced_jira_keys}
+            if jira_only:
+                print("### Jira Activity (no GitHub activity)")
+                for key, info in sorted(jira_only.items()):
+                    on_board = sprint_keys is None or key in sprint_keys
+                    board_note = "" if on_board else " [not on sprint board]"
+                    print(f"  - {key}: {info['summary']} ({info['status']}){board_note}")
+                print()
+
             print("---")
-            print(f"Total events in window: {len(events)}")
+            print(f"Total GitHub events in window: {len(events)}")
+            if jira_activity:
+                print(f"Total Jira issues updated in window: {len(jira_activity)}")
+            if sprint_keys is not None:
+                print(f"Sprint board has {len(sprint_keys)} issues")
 
     activity_text = buf.getvalue()
     print(activity_text, end="")
