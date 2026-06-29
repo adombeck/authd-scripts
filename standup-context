@@ -251,7 +251,8 @@ def run_standup_copilot(activity_text, out_path):
             "what changed, why, and current status. Do not repeat the title verbatim."
         )
         subprocess.run(
-            ["copilot", "-p", prompt, "--yolo", "--output-format", "text"],
+            ["copilot", "-p", prompt, "--yolo", "--output-format", "text",
+             "--model", "claude-sonnet-4.6"],
             check=True,
         )
     finally:
