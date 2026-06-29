@@ -86,10 +86,19 @@ def run_standup_copilot(activity_text, out_path):
     try:
         prompt = (
             f"Read the file at {tmp_path}. It contains my GitHub activity since the last standup. "
-            f"Write a concise standup summary in Markdown to {out_path}, creating the directory if needed. "
-            "Group related work by theme. Note what was accomplished and what is in progress. "
-            "Highlight any issues or blockers raised. Keep it readable in under a minute. "
-            "Start with a '# Standup YYYY-MM-DD' heading."
+            f"Write a standup summary in Markdown to {out_path}, creating the directory if needed. "
+            "Start with a '# Standup YYYY-MM-DD' heading. "
+            "Then write one ## section per item in this order: "
+            "(1) each PR I opened, "
+            "(2) each PR I reviewed, "
+            "(3) each issue I opened, "
+            "(4) each PR or branch I pushed commits to (but did not open in this period). "
+            "Use the PR/issue title as the section heading, prefixed with its number, "
+            "e.g. '## #1234: Title here'. "
+            "For reviewed PRs add '(reviewed)' after the number. "
+            "For push-only entries use the branch name as the heading. "
+            "Under each heading write 1-3 sentences summarising what I did there — "
+            "what changed, why, and current status. Do not repeat the title verbatim."
         )
         subprocess.run(
             ["copilot", "-p", prompt, "--yolo", "--output-format", "text"],
