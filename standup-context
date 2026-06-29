@@ -14,7 +14,6 @@ import argparse
 import json
 import os
 import subprocess
-import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -56,15 +55,23 @@ def fmt(ts):
     return ts[:16].replace("T", " ") + " UTC"
 
 
-def fetch_pr_title(repo, num):
+def indent(text, prefix="    "):
+    """Indent multi-line body text for display under a list item."""
+    if not text or not text.strip():
+        return ""
+    return "\n".join(prefix + line for line in text.strip().splitlines())
+
+
+def fetch_pr_info(repo, num):
     try:
         result = subprocess.run(
-            ["gh", "api", f"/repos/{repo}/pulls/{num}", "--jq", ".title"],
+            ["gh", "api", f"/repos/{repo}/pulls/{num}", "--jq", "[.title, (.body // \"\")]"],
             capture_output=True, text=True, timeout=10,
         )
-        return (repo, num), result.stdout.strip() or "(unknown)"
+        title, body = json.loads(result.stdout.strip())
+        return (repo, num), (title or "(unknown)", body or "")
     except Exception:
-        return (repo, num), "(unknown)"
+        return (repo, num), ("(unknown)", "")
 
 
 def main():
@@ -106,8 +113,8 @@ def main():
         print("No GitHub activity found since the last standup.")
         return
 
-    # Collect unique PR (repo, number) pairs whose titles need fetching
-    # (the Events API omits PR titles in PullRequest* payloads)
+    # Collect unique PR (repo, number) pairs whose title+body need fetching
+    # (the Events API omits PR titles/bodies in PullRequest* payloads)
     pr_keys = set()
     for e in events:
         if e["type"] in ("PullRequestEvent", "PullRequestReviewEvent", "PullRequestReviewCommentEvent"):
@@ -115,15 +122,18 @@ def main():
             if num:
                 pr_keys.add((e["repo"]["name"], num))
 
-    pr_titles = {}
+    pr_cache = {}  # (repo, num) -> (title, body)
     with ThreadPoolExecutor(max_workers=8) as pool:
-        for key, title in (f.result() for f in as_completed(
-            pool.submit(fetch_pr_title, repo, num) for repo, num in pr_keys
+        for key, info in (f.result() for f in as_completed(
+            pool.submit(fetch_pr_info, repo, num) for repo, num in pr_keys
         )):
-            pr_titles[key] = title
+            pr_cache[key] = info
 
     def pr_title(repo, num):
-        return pr_titles.get((repo, num), "(unknown)")
+        return pr_cache.get((repo, num), ("(unknown)", ""))[0]
+
+    def pr_body(repo, num):
+        return pr_cache.get((repo, num), ("(unknown)", ""))[1]
 
     # --- PRs Opened ---
     opened_prs = [
@@ -135,6 +145,9 @@ def main():
         print("### PRs Opened")
         for ts, repo, num in sorted(opened_prs):
             print(f"  - {repo}#{num}: {pr_title(repo, num)} [{fmt(ts)}]")
+            body = pr_body(repo, num)
+            if body:
+                print(indent(body))
         print()
 
     # --- PRs Reviewed ---
@@ -147,13 +160,36 @@ def main():
             repo = e["repo"]["name"]
             num = pr.get("number")
             state = rev.get("state", "commented").lower()
+            body = (rev.get("body") or "").strip()
             key = (repo, num)
             if key not in reviews or state == "approved":
-                reviews[key] = (e["created_at"], repo, num, state)
+                reviews[key] = (e["created_at"], repo, num, state, body)
     if reviews:
         print("### PRs Reviewed")
-        for _, (ts, repo, num, state) in sorted(reviews.items()):
+        for _, (ts, repo, num, state, body) in sorted(reviews.items()):
             print(f"  - [{state}] {repo}#{num}: {pr_title(repo, num)} [{fmt(ts)}]")
+            if body:
+                print(indent(body))
+        print()
+
+    # --- PR Review Comments (inline) ---
+    review_comments = [
+        (
+            e["created_at"],
+            e["repo"]["name"],
+            e["payload"].get("pull_request", {}).get("number"),
+            e["payload"].get("comment", {}).get("path", ""),
+            (e["payload"].get("comment", {}).get("body") or "").strip(),
+        )
+        for e in events
+        if e["type"] == "PullRequestReviewCommentEvent" and e["payload"].get("action") == "created"
+    ]
+    if review_comments:
+        print("### PR Review Comments (inline)")
+        for ts, repo, num, path, body in sorted(review_comments):
+            print(f"  - {repo}#{num} {path} [{fmt(ts)}]")
+            if body:
+                print(indent(body))
         print()
 
     # --- Issues Opened ---
@@ -163,14 +199,17 @@ def main():
             e["repo"]["name"],
             e["payload"].get("issue", {}).get("number"),
             e["payload"].get("issue", {}).get("title", "(unknown)"),
+            (e["payload"].get("issue", {}).get("body") or "").strip(),
         )
         for e in events
         if e["type"] == "IssuesEvent" and e["payload"].get("action") == "opened"
     ]
     if opened_issues:
         print("### Issues Opened")
-        for ts, repo, num, title in sorted(opened_issues):
+        for ts, repo, num, title, body in sorted(opened_issues):
             print(f"  - {repo}#{num}: {title} [{fmt(ts)}]")
+            if body:
+                print(indent(body))
         print()
 
     # --- Commits Pushed ---
@@ -186,30 +225,36 @@ def main():
                 sha = c.get("sha", "")[:8]
                 if sha and sha not in seen_shas:
                     seen_shas.add(sha)
-                    msg = c.get("message", "").splitlines()[0]
+                    msg = c.get("message", "")
                     pushes.append((ts, repo, ref, sha, msg))
     if pushes:
         print("### Commits Pushed")
         for ts, repo, ref, sha, msg in sorted(pushes):
-            print(f"  - {repo} ({ref}) {sha}: {msg} [{fmt(ts)}]")
+            lines = msg.strip().splitlines()
+            print(f"  - {repo} ({ref}) {sha}: {lines[0] if lines else ''} [{fmt(ts)}]")
+            rest = "\n".join(lines[1:]).strip()
+            if rest:
+                print(indent(rest))
         print()
 
     # --- Issue/PR Comments ---
-    # Deduplicate per (repo, issue number)
-    comments = {}
-    for e in events:
-        if e["type"] == "IssueCommentEvent":
-            issue = e["payload"].get("issue", {})
-            repo = e["repo"]["name"]
-            num = issue.get("number")
-            title = issue.get("title", "(unknown)")
-            key = (repo, num)
-            if key not in comments:
-                comments[key] = (e["created_at"], repo, num, title)
+    comments = [
+        (
+            e["created_at"],
+            e["repo"]["name"],
+            e["payload"].get("issue", {}).get("number"),
+            e["payload"].get("issue", {}).get("title", "(unknown)"),
+            (e["payload"].get("comment", {}).get("body") or "").strip(),
+        )
+        for e in events
+        if e["type"] == "IssueCommentEvent" and e["payload"].get("action") == "created"
+    ]
     if comments:
         print("### Commented on Issues/PRs")
-        for _, (ts, repo, num, title) in sorted(comments.items()):
+        for ts, repo, num, title, body in sorted(comments):
             print(f"  - {repo}#{num}: {title} [{fmt(ts)}]")
+            if body:
+                print(indent(body))
         print()
 
     print("---")
