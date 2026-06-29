@@ -1,0 +1,171 @@
+#!/usr/bin/env bash
+# standup-context
+# Outputs structured GitHub activity since the last daily standup (Mon-Fri 14:30 Berlin).
+# Override the cutoff with: STANDUP_SINCE=2026-06-27T12:30:00Z ./standup-context
+
+set -euo pipefail
+
+STANDUP_TZ="Europe/Berlin"
+STANDUP_TIME="14:30"
+
+since_datetime() {
+    local dow
+    dow=$(TZ="$STANDUP_TZ" date +%u)  # 1=Mon ... 7=Sun
+    local days_back
+    [ "$dow" -eq 1 ] && days_back=3 || days_back=1
+    TZ="$STANDUP_TZ" date -d "$days_back days ago $STANDUP_TIME" --utc +'%Y-%m-%dT%H:%M:%SZ'
+}
+
+SINCE="${STANDUP_SINCE:-$(since_datetime)}"
+GITHUB_USER=$(gh api /user --jq '.login')
+
+echo "GitHub activity for @${GITHUB_USER}"
+echo "Since: ${SINCE}"
+echo "Generated: $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+echo ""
+
+TMPFILE=$(mktemp)
+trap 'rm -f "$TMPFILE"' EXIT
+
+gh api "/users/${GITHUB_USER}/events?per_page=100" > "$TMPFILE"
+
+python3 - "$SINCE" "$TMPFILE" <<'PYEOF'
+import sys, json, subprocess
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+since = sys.argv[1]
+with open(sys.argv[2]) as f:
+    events = json.load(f)
+
+all_events = events
+events = [e for e in events if e.get('created_at', '') >= since]
+
+# Warn if we may have hit the 100-event cap and could be missing data
+oldest = min((e['created_at'] for e in all_events), default='')
+if len(all_events) == 100 and oldest > since:
+    print("⚠️  Warning: 100-event API cap reached; activity before", oldest[:16], "UTC may be missing.")
+    print()
+
+if not events:
+    print("No GitHub activity found since the last standup.")
+    sys.exit(0)
+
+def fmt(ts):
+    return ts[:16].replace('T', ' ') + ' UTC'
+
+# Collect unique PR (repo, number) pairs that need title resolution
+pr_keys = set()
+for e in events:
+    if e['type'] in ('PullRequestEvent', 'PullRequestReviewEvent', 'PullRequestReviewCommentEvent'):
+        num = (e['payload'].get('number') or
+               e['payload'].get('pull_request', {}).get('number'))
+        if num:
+            pr_keys.add((e['repo']['name'], num))
+
+def fetch_pr_title(repo, num):
+    try:
+        result = subprocess.run(
+            ['gh', 'api', f'/repos/{repo}/pulls/{num}', '--jq', '.title'],
+            capture_output=True, text=True, timeout=10
+        )
+        return (repo, num), result.stdout.strip() or '(unknown)'
+    except Exception:
+        return (repo, num), '(unknown)'
+
+pr_titles = {}
+with ThreadPoolExecutor(max_workers=8) as pool:
+    futures = {pool.submit(fetch_pr_title, repo, num): (repo, num) for repo, num in pr_keys}
+    for future in as_completed(futures):
+        key, title = future.result()
+        pr_titles[key] = title
+
+def pr_title(repo, num):
+    return pr_titles.get((repo, num), '(unknown)')
+
+# --- PRs Opened ---
+opened_prs = [
+    (e['created_at'], e['repo']['name'], e['payload']['number'])
+    for e in events
+    if e['type'] == 'PullRequestEvent' and e['payload'].get('action') == 'opened'
+]
+if opened_prs:
+    print("### PRs Opened")
+    for ts, repo, num in sorted(opened_prs):
+        print(f"  - {repo}#{num}: {pr_title(repo, num)} [{fmt(ts)}]")
+    print()
+
+# --- PRs Reviewed ---
+# Deduplicate per (repo, PR number); prefer 'approved' over 'commented'
+reviews = {}
+for e in events:
+    if e['type'] == 'PullRequestReviewEvent':
+        pr = e['payload'].get('pull_request', {})
+        rev = e['payload'].get('review', {})
+        repo = e['repo']['name']
+        num = pr.get('number')
+        state = rev.get('state', 'commented').lower()
+        key = (repo, num)
+        if key not in reviews or state == 'approved':
+            reviews[key] = (e['created_at'], repo, num, state)
+if reviews:
+    print("### PRs Reviewed")
+    for _, (ts, repo, num, state) in sorted(reviews.items()):
+        print(f"  - [{state}] {repo}#{num}: {pr_title(repo, num)} [{fmt(ts)}]")
+    print()
+
+# --- Issues Opened ---
+opened_issues = [
+    (e['created_at'], e['repo']['name'],
+     e['payload'].get('issue', {}).get('number'),
+     e['payload'].get('issue', {}).get('title', '(unknown)'))
+    for e in events
+    if e['type'] == 'IssuesEvent' and e['payload'].get('action') == 'opened'
+]
+if opened_issues:
+    print("### Issues Opened")
+    for ts, repo, num, title in sorted(opened_issues):
+        print(f"  - {repo}#{num}: {title} [{fmt(ts)}]")
+    print()
+
+# --- Commits Pushed ---
+pushes = []
+seen_shas = set()
+for e in events:
+    if e['type'] == 'PushEvent':
+        p = e['payload']
+        ref = p.get('ref', '').replace('refs/heads/', '')
+        repo = e['repo']['name']
+        ts = e['created_at']
+        for c in p.get('commits', []):
+            sha = c.get('sha', '')[:8]
+            if sha and sha not in seen_shas:
+                seen_shas.add(sha)
+                msg = c.get('message', '').splitlines()[0]
+                pushes.append((ts, repo, ref, sha, msg))
+if pushes:
+    print("### Commits Pushed")
+    for ts, repo, ref, sha, msg in sorted(pushes):
+        print(f"  - {repo} ({ref}) {sha}: {msg} [{fmt(ts)}]")
+    print()
+
+# --- Issue/PR Comments ---
+# Deduplicate per (repo, issue number)
+comments = {}
+for e in events:
+    if e['type'] == 'IssueCommentEvent':
+        issue = e['payload'].get('issue', {})
+        repo = e['repo']['name']
+        num = issue.get('number')
+        title = issue.get('title', '(unknown)')
+        key = (repo, num)
+        if key not in comments:
+            comments[key] = (e['created_at'], repo, num, title)
+if comments:
+    print("### Commented on Issues/PRs")
+    for _, (ts, repo, num, title) in sorted(comments.items()):
+        print(f"  - {repo}#{num}: {title} [{fmt(ts)}]")
+    print()
+
+print("---")
+print(f"Total events in window: {len(events)}")
+PYEOF
