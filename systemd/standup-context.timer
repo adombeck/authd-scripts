@@ -1,0 +1,9 @@
+[Unit]
+Description=Daily standup GitHub activity collection (Mon-Fri 14:15 Berlin)
+
+[Timer]
+OnCalendar=Mon..Fri 14:15 Europe/Berlin
+Persistent=true
+
+[Install]
+WantedBy=timers.target

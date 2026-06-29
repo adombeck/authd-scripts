@@ -2,8 +2,36 @@
 # standup-context
 # Outputs structured GitHub activity since the last daily standup (Mon-Fri 14:30 Berlin).
 # Override the cutoff with: STANDUP_SINCE=2026-06-27T12:30:00Z ./standup-context
+#
+# Usage:
+#   standup-context            – print activity since last standup
+#   standup-context --install  – install systemd user timer to run daily at 14:15 Berlin
 
 set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SYSTEMD_USER_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+
+install_timer() {
+    local unit_src="$SCRIPT_DIR/systemd"
+
+    mkdir -p "$SYSTEMD_USER_DIR"
+
+    for unit in standup-context.service standup-context.timer; do
+        sed "s|@SCRIPT_DIR@|$SCRIPT_DIR|g" "$unit_src/$unit" > "$SYSTEMD_USER_DIR/$unit"
+        echo "Installed $SYSTEMD_USER_DIR/$unit"
+    done
+
+    systemctl --user daemon-reload
+    systemctl --user enable --now standup-context.timer
+    echo ""
+    systemctl --user list-timers standup-context.timer
+}
+
+if [[ "${1:-}" == "--install" ]]; then
+    install_timer
+    exit 0
+fi
 
 STANDUP_TZ="Europe/Berlin"
 STANDUP_TIME="14:30"

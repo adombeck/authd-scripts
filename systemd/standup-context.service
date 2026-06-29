@@ -1,0 +1,8 @@
+[Unit]
+Description=Collect GitHub activity for daily standup
+
+[Service]
+Type=oneshot
+ExecStart=@SCRIPT_DIR@/standup-context
+StandardOutput=journal
+StandardError=journal
