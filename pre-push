@@ -24,6 +24,10 @@ version=$(go mod edit -json "tools/go.mod" | \
   jq -r '.Require[] | select(.Path | test("golangci-lint")) | .Version')
 go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@"$version"
 
+# Use a per-worktree cache to prevent stale path references from other worktrees
+export GOLANGCI_LINT_CACHE
+GOLANGCI_LINT_CACHE="$(git rev-parse --absolute-git-dir)/golangci-lint-cache"
+
 if ! golangci-lint run; then
     set +x
     echo >&2 "pre-push: Error: golangci-lint failed"
