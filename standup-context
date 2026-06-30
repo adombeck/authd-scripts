@@ -226,8 +226,24 @@ def fetch_pr_info(repo, num):
     except Exception:
         return (repo, num), ("(unknown)", "", "", "")
 
+def fetch_pr_reviews(repo, num):
+    """Return (repo, num), {reviewer_login: latest_state} for all submitted reviews."""
+    try:
+        result = subprocess.run(
+            ["gh", "api", f"/repos/{repo}/pulls/{num}/reviews?per_page=100",
+             "--jq", "[.[] | select(.state != \"PENDING\") | {login: .user.login, state: .state}]"],
+            capture_output=True, text=True, timeout=10,
+        )
+        data = json.loads(result.stdout.strip() or "[]")
+        reviewers = {}
+        for r in data:
+            reviewers[r["login"]] = r["state"]  # last submission per reviewer wins
+        return (repo, num), reviewers
+    except Exception:
+        return (repo, num), {}
 
-def run_standup_copilot(activity_text, out_path):
+
+
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".txt", prefix="standup-activity-", delete=False
     ) as f:
@@ -268,6 +284,9 @@ def run_standup_copilot(activity_text, out_path):
             "For reviewed PRs add '(reviewed)' after the key/number. "
             "For push-only entries use the branch name as the heading if no Jira key is present. "
 
+            "If a PR has 'Reviewed by:' information, mention the reviewer(s) by first name in "
+            "the section body — e.g. 'Reviewed and approved by Alice.' or "
+            "'Bob requested changes.' "
             "Always render Jira keys and GitHub PR/issue references as Markdown links. "
             "Prefix GitHub issues with 'Issue' and pull requests with 'PR'. "
 
@@ -365,6 +384,20 @@ def main():
     # Fetch any Jira issues not already loaded from the activity query
     jira_cache = fetch_jira_issues_by_keys(all_jira_keys, jira_creds, jira_activity)
 
+    # Fetch reviews for PRs opened by the current user
+    opened_pr_keys = {
+        (e["repo"]["name"], e["payload"]["number"])
+        for e in events
+        if e["type"] == "PullRequestEvent" and e["payload"].get("action") == "opened"
+    }
+    reviews_cache = {}
+    if opened_pr_keys:
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            for key, reviewers in (f.result() for f in as_completed(
+                pool.submit(fetch_pr_reviews, repo, num) for repo, num in opened_pr_keys
+            )):
+                reviews_cache[key] = reviewers
+
     # -----------------------------------------------------------------------
     # Output helpers (defined here to close over github_user, jira_cache, sprint_keys)
     # -----------------------------------------------------------------------
@@ -397,6 +430,26 @@ def main():
 
     def print_gh_url(repo, num, is_pr):
         print(f"    GitHub URL: {gh_url(repo, num, is_pr)}")
+
+    _REVIEW_STATE_LABELS = {
+        "APPROVED": "approved",
+        "CHANGES_REQUESTED": "changes requested",
+        "COMMENTED": "commented",
+        "DISMISSED": "dismissed",
+    }
+
+    def print_reviewers(repo, num):
+        revs = {
+            login: state
+            for login, state in reviews_cache.get((repo, num), {}).items()
+            if login != github_user
+        }
+        if revs:
+            parts = [
+                f"{first_name(login)} ({_REVIEW_STATE_LABELS.get(state, state.lower())})"
+                for login, state in sorted(revs.items())
+            ]
+            print(f"    Reviewed by: {', '.join(parts)}")
 
     def print_assignee(asgn_login):
         if asgn_login and asgn_login != github_user:
@@ -434,6 +487,7 @@ def main():
                     print_gh_url(repo, num, True)
                     print_jira_annot(jm, github_referenced_jira_keys)
                     print_assignee(asgn_login)
+                    print_reviewers(repo, num)
                     if b:
                         print(indent(b))
                 print()
