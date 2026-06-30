@@ -3,6 +3,120 @@
 usage() {
     echo "Usage: source $0 <branch-name>" >&2
     echo "       source $0 --cleanup [--force]" >&2
+    echo "       $0 --setup-submodule <submodule-path> <ref>" >&2
+    echo >&2
+    echo "  --setup-submodule: sets up a submodule that doesn't exist on the current" >&2
+    echo "    branch but does on <ref>. Run from the worktree before 'git reset --hard <ref>'." >&2
+}
+
+# _submod_linked_gitdir <main-submod-git> <worktree-submod-git> <checkout> <commit>
+#
+# Creates the linked worktree git dir and working-tree checkout for a submodule.
+# See setup_submodule for the rationale behind the manual construction.
+_submod_linked_gitdir() {
+    _MSG="$1"
+    _WTG="$2"
+    _CKO="$3"
+    _CMT="$4"
+
+    git --git-dir="$_MSG" worktree prune 2>/dev/null || true
+    rm -rf "$_WTG" "$_CKO"
+
+    # Manually construct a proper linked worktree git dir at the path git expects.
+    # IMPORTANT: the path must end with the full submodule name; git validates this
+    # in submodule.c and BUGs out if it doesn't match. Using "git worktree add" on
+    # the submodule itself puts the git dir under worktrees/<name>/ which fails that
+    # check, so we build the structure by hand instead.
+    mkdir -p "$_WTG"
+    printf '%s\n' "$_CMT"  > "$_WTG/HEAD"
+    printf '%s\n' "$_MSG"  > "$_WTG/commondir"
+    printf '%s\n' "$_CKO/.git" > "$_WTG/gitdir"
+
+    mkdir -p "$_CKO"
+    printf 'gitdir: %s\n' "$_WTG" > "$_CKO/.git"
+    git --git-dir="$_WTG" --work-tree="$_CKO" checkout -f HEAD -- .
+}
+
+# setup_submodule <mainrepo> <workspace-abs> <worktree-name> <submod-path>
+#
+# Sets up a submodule as a proper linked worktree git dir. The submodule must
+# already be listed in the worktree's .gitmodules (i.e. exist on its HEAD).
+# Must be called from within the main repo.
+setup_submodule() {
+    _SS_MAINREPO="$1"
+    _SS_WORKSPACE="$2"
+    _SS_WTNAME="$3"
+    _SS_SUBMOD="$4"
+
+    _SS_MSG="$_SS_MAINREPO/.git/modules/$_SS_SUBMOD"
+    _SS_WTG="$_SS_MAINREPO/.git/worktrees/$_SS_WTNAME/modules/$_SS_SUBMOD"
+    _SS_CKO="$_SS_WORKSPACE/$_SS_SUBMOD"
+
+    # Ensure the submodule is initialized in the main repo.
+    git submodule update --init "$_SS_SUBMOD"
+
+    _SS_COMMIT=$(git -C "$_SS_WORKSPACE" ls-tree HEAD "$_SS_SUBMOD" | awk '{print $3}')
+
+    _submod_linked_gitdir "$_SS_MSG" "$_SS_WTG" "$_SS_CKO" "$_SS_COMMIT"
+}
+
+# setup_submodule_from_worktree <submod-path> <ref>
+#
+# Sets up a submodule that is present on <ref> but not on the current HEAD.
+# Must be called from within the linked worktree. Initialises the main module
+# git dir by cloning if necessary, then sets up the linked worktree git dir.
+# After this, 'git reset --hard <ref>' will succeed.
+setup_submodule_from_worktree() {
+    _SWFT_SUBMOD="$1"
+    _SWFT_REF="$2"
+
+    _SWFT_WORKSPACE="$(git rev-parse --show-toplevel)"
+    _SWFT_COMMON="$(git rev-parse --git-common-dir)"
+    _SWFT_MAINREPO="$(cd "$_SWFT_COMMON/.." && pwd)"
+    _SWFT_WTNAME="$(basename "$_SWFT_WORKSPACE")"
+
+    _SWFT_MSG="$_SWFT_MAINREPO/.git/modules/$_SWFT_SUBMOD"
+    _SWFT_WTG="$_SWFT_MAINREPO/.git/worktrees/$_SWFT_WTNAME/modules/$_SWFT_SUBMOD"
+    _SWFT_CKO="$_SWFT_WORKSPACE/$_SWFT_SUBMOD"
+
+    # Get the URL and commit from the target ref's .gitmodules and tree.
+    _SWFT_TF=$(mktemp)
+    git show "$_SWFT_REF:.gitmodules" > "$_SWFT_TF" 2>/dev/null
+    _SWFT_URL=$(git config --file "$_SWFT_TF" "submodule.$_SWFT_SUBMOD.url" 2>/dev/null)
+    rm -f "$_SWFT_TF"
+
+    if [ -z "$_SWFT_URL" ]; then
+        echo "error: submodule '$_SWFT_SUBMOD' not found in $_SWFT_REF:.gitmodules" >&2
+        return 1 2>/dev/null || exit 1
+    fi
+
+    _SWFT_COMMIT=$(git ls-tree "$_SWFT_REF" "$_SWFT_SUBMOD" | awk '{print $3}')
+    if [ -z "$_SWFT_COMMIT" ]; then
+        echo "error: submodule '$_SWFT_SUBMOD' not found in tree of $_SWFT_REF" >&2
+        return 1 2>/dev/null || exit 1
+    fi
+
+    # If the main module git dir doesn't exist yet, clone it.
+    if [ ! -d "$_SWFT_MSG" ]; then
+        _SWFT_TMP=$(mktemp -d)
+        git clone --quiet --no-checkout \
+            --separate-git-dir="$_SWFT_MSG" \
+            "$_SWFT_URL" "$_SWFT_TMP/checkout"
+        rm -rf "$_SWFT_TMP"
+        # Fix core.worktree: from .git/modules/<submod>/ to <mainrepo>/<submod>/,
+        # the relative path is (num_path_components + 2) levels up, then <submod>.
+        _SWFT_NCOMP=$(printf '%s' "$_SWFT_SUBMOD" | awk -F/ '{print NF}')
+        _SWFT_UPS=$((_SWFT_NCOMP + 2))
+        _SWFT_REL=""
+        _i=0
+        while [ "$_i" -lt "$_SWFT_UPS" ]; do
+            _SWFT_REL="${_SWFT_REL}../"
+            _i=$((_i + 1))
+        done
+        git --git-dir="$_SWFT_MSG" config core.worktree "${_SWFT_REL}${_SWFT_SUBMOD}"
+    fi
+
+    _submod_linked_gitdir "$_SWFT_MSG" "$_SWFT_WTG" "$_SWFT_CKO" "$_SWFT_COMMIT"
 }
 
 create_worktree() {
@@ -36,42 +150,16 @@ create_worktree() {
                 fi
             fi
 
-            # Set up the submodule for libhimmelblau.
-            SUBMOD=authd-oidc-brokers/third_party/libhimmelblau
             MAINREPO="$(git rev-parse --show-toplevel)"
             WORKSPACE_ABS="$(cd "$workspace" && pwd)"
             WORKTREE_NAME="$(basename "$WORKSPACE_ABS")"
-            MAIN_SUBMOD_GIT="$MAINREPO/.git/modules/$SUBMOD"
-            WORKTREE_SUBMOD_GIT="$MAINREPO/.git/worktrees/$WORKTREE_NAME/modules/$SUBMOD"
-            CHECKOUT="$WORKSPACE_ABS/$SUBMOD"
 
-            # Ensure the submodule is initialized in the main repo.
-            git submodule update --init --recursive "$SUBMOD"
-
-            # Get the commit the submodule should be at in the new worktree.
-            COMMIT=$(git -C "$WORKSPACE_ABS" ls-tree HEAD "$SUBMOD" | awk '{print $3}')
-
-            # Remove any stale/incomplete submodule setup in the new worktree, including
-            # any leftover worktree entries git may have added inside the submodule git dir.
-            git -C "$MAINREPO/$SUBMOD" worktree prune 2>/dev/null || true
-            rm -rf "$WORKTREE_SUBMOD_GIT" "$CHECKOUT"
-
-            # Manually construct a proper linked worktree git dir at the path git expects.
-            # IMPORTANT: the path must end with the full submodule name; git validates this
-            # in submodule.c and BUGs out if it doesn't match. Using "git worktree add" on
-            # the submodule itself puts the git dir under worktrees/<name>/ which fails that
-            # check, so we build the structure by hand instead.
-            mkdir -p "$WORKTREE_SUBMOD_GIT"
-            printf '%s\n' "$COMMIT"           > "$WORKTREE_SUBMOD_GIT/HEAD"
-            printf '%s\n' "$MAIN_SUBMOD_GIT" > "$WORKTREE_SUBMOD_GIT/commondir"
-            printf '%s\n' "$CHECKOUT/.git"   > "$WORKTREE_SUBMOD_GIT/gitdir"
-
-            # Create the checkout directory with a .git pointer to the worktree git dir,
-            # then populate the working tree from the required commit.
-            mkdir -p "$CHECKOUT"
-            printf 'gitdir: %s\n' "$WORKTREE_SUBMOD_GIT" > "$CHECKOUT/.git"
-            git --git-dir="$WORKTREE_SUBMOD_GIT" --work-tree="$CHECKOUT" \
-                checkout -f HEAD -- .
+            # Set up each submodule declared in the new worktree.
+            git config --file "$WORKSPACE_ABS/.gitmodules" --get-regexp 'submodule\..*\.path' \
+            | awk '{print $2}' \
+            | while IFS= read -r SUBMOD; do
+                setup_submodule "$MAINREPO" "$WORKSPACE_ABS" "$WORKTREE_NAME" "$SUBMOD"
+            done
         fi
     ) || return 1
 
@@ -269,6 +357,13 @@ case "$1" in
     --cleanup)
         shift
         cleanup_worktrees "$@"
+        ;;
+    --setup-submodule)
+        if [ "$#" -ne 3 ]; then
+            usage
+            return 1 2>/dev/null || exit 1
+        fi
+        setup_submodule_from_worktree "$2" "$3"
         ;;
     -h | --help)
         usage
