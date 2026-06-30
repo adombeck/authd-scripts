@@ -291,10 +291,10 @@ def fetch_pr_reviews(repo, num):
             "Always render Jira keys and GitHub PR/issue references as Markdown links. "
             "Prefix GitHub issues with 'Issue' and pull requests with 'PR'. "
 
-            "If an item is marked '[no Jira issue]', add '⚠️ No Jira issue' as a standalone line "
-            "near the top of the entry body (after the first sentence). "
-            "If an item is marked '[not on sprint board]', add '⚠️ Not on sprint board' as a "
-            "standalone line near the top of the entry body (after the first sentence). "
+            "If an item is marked '[no Jira issue]', put '⚠️ No Jira issue' as the very first line "
+            "of the entry body, on its own line, before any description. "
+            "If an item is marked '[not on sprint board]', put '⚠️ Not on sprint board' as the very "
+            "first line of the entry body, on its own line, before any description. "
 
             "Under each ### heading write 1-3 sentences summarising what I did there — "
             "what changed, why, and current status. Do not repeat the title verbatim."
