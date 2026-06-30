@@ -149,16 +149,19 @@ def fetch_sprint_issue_keys(creds):
         return None
     sprint_id = sprints["values"][0]["id"]
 
+    # Use the REST search API with JQL — more reliable than the Agile sprint issues endpoint.
     keys = set()
     start = 0
     while True:
-        result = jira_request(
-            f"/rest/agile/1.0/sprint/{sprint_id}/issue?"
-            + urllib.parse.urlencode({"fields": "key", "startAt": start, "maxResults": 100}),
-            creds,
-        )
+        path = "/rest/api/3/search?" + urllib.parse.urlencode({
+            "jql": f"sprint = {sprint_id}",
+            "fields": "key",
+            "startAt": start,
+            "maxResults": 100,
+        })
+        result = jira_request(path, creds)
         if not result:
-            break
+            return None  # Partial data is worse than no data — suppress false warnings
         issues = result.get("issues", [])
         if not issues:
             break
