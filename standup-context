@@ -297,7 +297,8 @@ def fetch_pr_reviews(repo, num):
             "first line of the entry body, on its own line, before any description. "
 
             "Under each ### heading write 1-3 sentences summarising what I did there — "
-            "what changed, why, and current status. Do not repeat the title verbatim."
+            "motivation first (why it was needed), then what was done and the current status. "
+            "Do not repeat the title verbatim."
         )
         subprocess.run(
             ["copilot", "-p", prompt, "--yolo", "--output-format", "text",
