@@ -38,14 +38,40 @@ create_worktree() {
 
             # Set up the submodule for libhimmelblau.
             SUBMOD=authd-oidc-brokers/third_party/libhimmelblau
-            WORKTREE=$(basename "$(git rev-parse --show-toplevel)")
-            MAINREPO="$(git rev-parse --show-toplevel | xargs -I{} dirname {})/authd"
+            MAINREPO="$(git rev-parse --show-toplevel)"
+            WORKSPACE_ABS="$(cd "$workspace" && pwd)"
+            WORKTREE_NAME="$(basename "$WORKSPACE_ABS")"
+            MAIN_SUBMOD_GIT="$MAINREPO/.git/modules/$SUBMOD"
+            WORKTREE_SUBMOD_GIT="$MAINREPO/.git/worktrees/$WORKTREE_NAME/modules/$SUBMOD"
+            CHECKOUT="$WORKSPACE_ABS/$SUBMOD"
 
-            rm -rf \
-                "$MAINREPO/.git/worktrees/$WORKTREE/modules/$SUBMOD" \
-                "$SUBMOD/.git"
-
+            # Ensure the submodule is initialized in the main repo.
             git submodule update --init --recursive "$SUBMOD"
+
+            # Get the commit the submodule should be at in the new worktree.
+            COMMIT=$(git -C "$WORKSPACE_ABS" ls-tree HEAD "$SUBMOD" | awk '{print $3}')
+
+            # Remove any stale/incomplete submodule setup in the new worktree, including
+            # any leftover worktree entries git may have added inside the submodule git dir.
+            git -C "$MAINREPO/$SUBMOD" worktree prune 2>/dev/null || true
+            rm -rf "$WORKTREE_SUBMOD_GIT" "$CHECKOUT"
+
+            # Manually construct a proper linked worktree git dir at the path git expects.
+            # IMPORTANT: the path must end with the full submodule name; git validates this
+            # in submodule.c and BUGs out if it doesn't match. Using "git worktree add" on
+            # the submodule itself puts the git dir under worktrees/<name>/ which fails that
+            # check, so we build the structure by hand instead.
+            mkdir -p "$WORKTREE_SUBMOD_GIT"
+            printf '%s\n' "$COMMIT"           > "$WORKTREE_SUBMOD_GIT/HEAD"
+            printf '%s\n' "$MAIN_SUBMOD_GIT" > "$WORKTREE_SUBMOD_GIT/commondir"
+            printf '%s\n' "$CHECKOUT/.git"   > "$WORKTREE_SUBMOD_GIT/gitdir"
+
+            # Create the checkout directory with a .git pointer to the worktree git dir,
+            # then populate the working tree from the required commit.
+            mkdir -p "$CHECKOUT"
+            printf 'gitdir: %s\n' "$WORKTREE_SUBMOD_GIT" > "$CHECKOUT/.git"
+            git --git-dir="$WORKTREE_SUBMOD_GIT" --work-tree="$CHECKOUT" \
+                checkout -f HEAD -- .
         fi
     ) || return 1
 
