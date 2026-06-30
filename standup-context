@@ -243,7 +243,7 @@ def fetch_pr_reviews(repo, num):
         return (repo, num), {}
 
 
-
+def run_standup_copilot(activity_text, out_path):
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".txt", prefix="standup-activity-", delete=False
     ) as f:
