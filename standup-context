@@ -281,7 +281,8 @@ def fetch_pr_reviews(repo, num):
             "Use the 'GitHub URL:' annotation for the GitHub link. "
             "If the item has '[assigned to: Name]', append that to the heading in parentheses, "
             "e.g. '… (Alice's PR)'. "
-            "For reviewed PRs add '(reviewed)' after the key/number. "
+            "For reviewed PRs, prefix the ### heading with 'Reviewed: ', e.g. "
+            "'### Reviewed: [UDENG-1234](url): Title'. "
             "For push-only entries use the branch name as the heading if no Jira key is present. "
 
             "If a PR has 'Reviewed by:' information, mention the reviewer(s) by first name in "
