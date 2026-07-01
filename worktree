@@ -121,7 +121,8 @@ setup_submodule_from_worktree() {
 
 create_worktree() {
     branch="$1"
-    workspace="../authd-${branch}"
+    worktree_dirname=$(printf '%s' "$branch" | tr '/' '-')
+    workspace="../authd-${worktree_dirname}"
 
     (
         set -euo pipefail
