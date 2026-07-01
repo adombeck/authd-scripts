@@ -147,14 +147,16 @@ def fetch_sprint_issue_keys(creds):
     sprints = jira_request(f"/rest/agile/1.0/board/{board_id}/sprint?state=active", creds)
     if not sprints or not sprints.get("values"):
         return None
-    sprint_id = sprints["values"][0]["id"]
+    sprint_ids = [s["id"] for s in sprints["values"]]
 
     # Use the REST search API with JQL — more reliable than the Agile sprint issues endpoint.
+    # Query all active sprints together so boards with multiple concurrent sprints are covered.
+    sprint_jql = " OR ".join(f"sprint = {sid}" for sid in sprint_ids)
     keys = set()
     start = 0
     while True:
         path = "/rest/api/3/search?" + urllib.parse.urlencode({
-            "jql": f"sprint = {sprint_id}",
+            "jql": sprint_jql,
             "fields": "key",
             "startAt": start,
             "maxResults": 100,
