@@ -94,6 +94,30 @@ go mod vendor
 
 ./snap/scripts/prepare-variant --broker "${BROKER}"
 
+# Wrapper that runs snapcraft and checks for a known failure mode: after a
+# snapd upgrade on the host, the snap-confine AppArmor profiles inside the LXD
+# build containers become stale and snap operations inside the container fail
+# with "cannot fstatat canonical snap directory: Permission denied". Restarting
+# LXD refreshes the profiles and fixes it.
+run_snapcraft() {
+    local tmp_log
+    tmp_log=$(mktemp)
+    # Tee both stdout and stderr to the terminal while also capturing stderr.
+    if ! snapcraft "$@" 2> >(tee "${tmp_log}" >&2); then
+        if grep -q "cannot fstatat canonical snap directory" "${tmp_log}"; then
+            echo >&2 ""
+            echo >&2 "ERROR: snapd AppArmor profiles inside the LXD build instance are stale."
+            echo >&2 "This typically happens after a snapd upgrade on the host. Fix with:"
+            echo >&2 ""
+            echo >&2 "    sudo snap restart lxd"
+            echo >&2 ""
+        fi
+        rm -f "${tmp_log}"
+        return 1
+    fi
+    rm -f "${tmp_log}"
+}
+
 # Force a fresh pull of the 'broker' part. snapcraft's local source copy is
 # additive: when re-pulling into the reused build instance it never deletes
 # files that have since been removed from the source. Switching branches can
@@ -109,9 +133,9 @@ go mod vendor
 # build instance was first created with — even though the script recomputes the
 # correct value, the cached variable is what ends up in the .snap filename and
 # the embedded -ldflags Version. Cleaning the part forces a recompute.
-snapcraft clean broker version
+run_snapcraft clean broker version
 
-time snapcraft pack "$@"
+time run_snapcraft pack "$@"
 
 # shellcheck disable=SC2012 # The .snap file doesn't contain non-alphanumeric characters
 SNAP_FILE=$(ls -t *.snap | head -n1)
