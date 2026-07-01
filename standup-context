@@ -704,8 +704,19 @@ def main():
 
     run_standup_copilot(activity_text, out_path)
 
+    # When running as a systemd user service, WAYLAND_DISPLAY is not inherited
+    # from the graphical session. Detect it from XDG_RUNTIME_DIR so that the
+    # flatpak GUI app can connect to the compositor.
+    env = dict(os.environ)
+    if "WAYLAND_DISPLAY" not in env:
+        xdg_runtime = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"))
+        sockets = sorted(xdg_runtime.glob("wayland-[0-9]"))
+        if sockets:
+            env["WAYLAND_DISPLAY"] = sockets[0].name
+
     subprocess.Popen(
-        ["flatpak", "run", "org.gnome.gitlab.somas.Apostrophe", "--", str(out_path)]
+        ["flatpak", "run", "org.gnome.gitlab.somas.Apostrophe", "--", str(out_path)],
+        env=env,
     )
 
 
