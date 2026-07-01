@@ -1,0 +1,204 @@
+#!/usr/bin/env bash
+
+# Builds authd and/or a broker from the current branch, provisions them in the
+# e2e test VM, and runs the end-to-end tests.
+#
+# Must be run from the root of an authd repository (or worktree), or the repo
+# path must be supplied via --repo.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+
+usage() {
+    cat << EOF
+Usage: $0 [options] [test.robot...]
+
+Builds authd and/or a broker snap from the current branch, provisions the VM,
+and runs the e2e tests. By default both authd and the broker are rebuilt.
+
+Options:
+  --build <what>       What to (re)build before running: authd, broker, or both
+                       (default: both)
+  --broker <broker>    Broker to build and test, e.g. authd-google, authd-msentraid
+                       (can also be set via BROKER environment variable)
+  --release <release>  Ubuntu release to test, e.g. noble, resolute
+                       (can also be set via RELEASE environment variable)
+  --repo <dir>         Path to the authd repository (default: current directory)
+  --build-dir <dir>    Directory for build artifacts (default: ../build relative
+                       to the repo root)
+  -h, --help           Show this help and exit
+
+Any remaining arguments are passed through to run-tests.sh (e.g. test files,
+--output-dir, --rerunfailed).
+EOF
+}
+
+BUILD_WHAT="both"
+BROKER="${BROKER:-}"
+RELEASE="${RELEASE:-}"
+REPO_DIR=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --build)
+            BUILD_WHAT="$2"
+            shift 2
+            ;;
+        --broker)
+            BROKER="$2"
+            shift 2
+            ;;
+        --release)
+            RELEASE="$2"
+            shift 2
+            ;;
+        --repo)
+            REPO_DIR="$2"
+            shift 2
+            ;;
+        --build-dir)
+            BUILD_DIR="$2"
+            shift 2
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        --)
+            shift
+            break
+            ;;
+        -*)
+            echo >&2 "Unknown option: $1"
+            usage >&2
+            exit 1
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
+
+case "${BUILD_WHAT}" in
+    authd|broker|both) ;;
+    *)
+        echo >&2 "Invalid value for --build: '${BUILD_WHAT}'. Must be authd, broker, or both."
+        exit 1
+        ;;
+esac
+
+# Resolve the authd repo root
+if [[ -n "${REPO_DIR}" ]]; then
+    GIT_ROOT="$(realpath "${REPO_DIR}")"
+else
+    GIT_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || {
+        echo >&2 "Not inside an authd repository. Use --repo <dir> to specify one."
+        exit 1
+    }
+fi
+
+BUILD_DIR="$(realpath "${BUILD_DIR:-${GIT_ROOT}/../build}")"
+E2E_DIR="${GIT_ROOT}/e2e-tests"
+
+# ------------------------------------------------------------------
+# Build authd deb
+# ------------------------------------------------------------------
+if [[ "${BUILD_WHAT}" == "authd" || "${BUILD_WHAT}" == "both" ]]; then
+    echo "==> Building authd deb..."
+    (
+        cd "${GIT_ROOT}"
+        "${SCRIPT_DIR}/build-authd-deb" \
+            --build-dir "${BUILD_DIR}/$(basename "${GIT_ROOT}")" \
+            --no-lintian
+    )
+fi
+
+# ------------------------------------------------------------------
+# Build broker snap
+# ------------------------------------------------------------------
+if [[ "${BUILD_WHAT}" == "broker" || "${BUILD_WHAT}" == "both" ]]; then
+    if [[ -z "${BROKER:-}" ]]; then
+        # Try to read BROKER from the repo's config file
+        CONFIG_FILE="${E2E_DIR}/vm/config.env"
+        if [[ ! -f "${CONFIG_FILE}" ]]; then
+            _git_common_dir=$(git -C "${GIT_ROOT}" rev-parse --git-common-dir 2>/dev/null || true)
+            if [[ "${_git_common_dir}" == /* ]]; then
+                CONFIG_FILE="$(dirname "${_git_common_dir}")/e2e-tests/vm/config.env"
+            fi
+        fi
+        if [[ -f "${CONFIG_FILE}" ]]; then
+            # shellcheck source=/dev/null
+            source "${CONFIG_FILE}"
+        fi
+    fi
+
+    if [[ -z "${BROKER:-}" ]]; then
+        echo >&2 "Error: --broker is required when building the broker snap."
+        echo >&2 "Set it via --broker or the BROKER environment variable."
+        exit 1
+    fi
+
+    # build-broker-snap expects the short broker name without the 'authd-' prefix
+    BROKER_SHORT="${BROKER#authd-}"
+
+    echo "==> Building ${BROKER} snap..."
+    (
+        cd "${GIT_ROOT}"
+        "${SCRIPT_DIR}/build-broker-snap" \
+            --broker "${BROKER_SHORT}" \
+            --build-dir "${BUILD_DIR}"
+    )
+fi
+
+# ------------------------------------------------------------------
+# Locate the artifacts to provision
+# ------------------------------------------------------------------
+
+# Find the most recently built authd deb in the build dir
+AUTHD_DEB="$(ls -t "${BUILD_DIR}"/authd_*_amd64.deb 2>/dev/null | head -n1)"
+if [[ -z "${AUTHD_DEB}" ]]; then
+    echo >&2 "No authd deb found in ${BUILD_DIR}. Build one first with --build authd."
+    exit 1
+fi
+
+# Find the most recently built broker snap in the build dir
+BROKER_SNAP=""
+if [[ -n "${BROKER:-}" ]]; then
+    BROKER_SHORT="${BROKER#authd-}"
+    BROKER_SNAP="$(ls -t "${BUILD_DIR}"/authd-"${BROKER_SHORT}"_*.snap 2>/dev/null | head -n1)"
+    if [[ -z "${BROKER_SNAP}" ]]; then
+        echo >&2 "No ${BROKER} snap found in ${BUILD_DIR}. Build one first with --build broker."
+        exit 1
+    fi
+fi
+
+# ------------------------------------------------------------------
+# Provision the VM
+# ------------------------------------------------------------------
+echo "==> Provisioning VM (authd: $(basename "${AUTHD_DEB}"), broker snap: $(basename "${BROKER_SNAP:-none}"))..."
+
+PROVISION_ARGS=()
+[[ -n "${BROKER:-}" ]]      && PROVISION_ARGS+=(--broker  "${BROKER}")
+[[ -n "${RELEASE:-}" ]]     && PROVISION_ARGS+=(--release "${RELEASE}")
+PROVISION_ARGS+=(--authd-deb "${AUTHD_DEB}")
+[[ -n "${BROKER_SNAP:-}" ]] && PROVISION_ARGS+=(--broker-snap "${BROKER_SNAP}")
+
+(
+    cd "${GIT_ROOT}"
+    "${E2E_DIR}/vm/provision-authd.sh" "${PROVISION_ARGS[@]}"
+)
+
+# ------------------------------------------------------------------
+# Run the tests
+# ------------------------------------------------------------------
+echo "==> Running e2e tests..."
+
+RUN_ARGS=()
+[[ -n "${BROKER:-}" ]]  && RUN_ARGS+=(--broker  "${BROKER}")
+[[ -n "${RELEASE:-}" ]] && RUN_ARGS+=(--release "${RELEASE}")
+
+(
+    cd "${GIT_ROOT}"
+    "${E2E_DIR}/run-tests.sh" "${RUN_ARGS[@]}" "$@"
+)
