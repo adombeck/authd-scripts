@@ -323,8 +323,9 @@ def run_standup_copilot(activity_text, out_path):
             "if there are pushed commits for an issue and its Jira status is 'To Do', add "
             "'⚠️ Work started but Jira is still To Do'. "
 
-            "Under each ### heading write 1-3 sentences summarising what I did there — "
-            "motivation first (why it was needed), then what was done and the current status. "
+            "Under each ### heading write 1-3 sentences summarising what I did there. "
+            "Always lead with the problem or motivation in plain terms — what wasn't working, "
+            "what was missing, or why this was needed — before describing the solution and current status. "
             "Do not repeat the title verbatim."
         )
         subprocess.run(
