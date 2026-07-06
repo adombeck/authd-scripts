@@ -1,0 +1,195 @@
+#!/bin/bash
+
+# Finds the Jira ticket matching a GitHub issue (by title, reported by "STS API"),
+# assigns it to the current user, adds it to the active sprint, and marks it as
+# In Progress.
+
+set -euo pipefail
+
+JIRA_SERVER="https://warthogs.atlassian.net"
+JIRA_PROJECT="UDENG"
+CREDENTIALS_FILE="$HOME/.jira_credentials"
+RETRY_TIMEOUT=30
+RETRY_INTERVAL=3
+
+usage() {
+    cat <<EOF
+Usage: $0 <github-issue-url>
+
+Finds the Jira ticket created from the given GitHub issue (matched by title,
+reported by "STS API"), then:
+  - Assigns it to you
+  - Adds it to the active sprint
+  - Transitions it to "In Progress"
+
+Reads settings from $CREDENTIALS_FILE.
+EOF
+}
+
+die() { echo "Error: $1" >&2; exit 1; }
+
+if [[ $# -ne 1 ]]; then
+    usage
+    exit 1
+fi
+
+GITHUB_ISSUE_URL="$1"
+
+# ── Read credentials ──────────────────────────────────────────────────────────
+[[ -f "$CREDENTIALS_FILE" ]] || die "Credentials file not found: $CREDENTIALS_FILE"
+
+API_TOKEN=$(grep 'token: ' "$CREDENTIALS_FILE" | sed 's/token: //' | tr -d '"')
+EMAIL=$(grep 'user: ' "$CREDENTIALS_FILE" | sed 's/user: //' | tr -d '"')
+BOARD_ID=$(grep 'board_id: ' "$CREDENTIALS_FILE" | sed 's/board_id: //' | tr -d '"')
+
+[[ -n "$API_TOKEN" && -n "$EMAIL" && -n "$BOARD_ID" ]] || die "Missing credentials"
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+jira_get() {
+    local path="$1"
+    curl --silent --fail --show-error \
+        --user "$EMAIL:$API_TOKEN" \
+        --header "Accept: application/json" \
+        "$JIRA_SERVER$path"
+}
+
+jira_post() {
+    local path="$1" body="$2"
+    curl --silent --fail --show-error \
+        --user "$EMAIL:$API_TOKEN" \
+        --header "Content-Type: application/json" \
+        --header "Accept: application/json" \
+        --request POST \
+        --data "$body" \
+        "$JIRA_SERVER$path"
+}
+
+jira_put() {
+    local path="$1" body="$2"
+    curl --silent --fail --show-error \
+        --user "$EMAIL:$API_TOKEN" \
+        --header "Content-Type: application/json" \
+        --header "Accept: application/json" \
+        --request PUT \
+        --data "$body" \
+        "$JIRA_SERVER$path"
+}
+
+# ── Fetch GitHub issue title ──────────────────────────────────────────────────
+echo "Fetching GitHub issue: $GITHUB_ISSUE_URL"
+
+# Accept both https://github.com/owner/repo/issues/N and plain owner/repo#N forms
+if [[ "$GITHUB_ISSUE_URL" =~ github\.com/([^/]+)/([^/]+)/issues/([0-9]+) ]]; then
+    GH_REPO="${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+    GH_ISSUE_NUMBER="${BASH_REMATCH[3]}"
+else
+    die "Unrecognised GitHub issue URL: $GITHUB_ISSUE_URL"
+fi
+
+ISSUE_TITLE=$(gh issue view "$GH_ISSUE_NUMBER" --repo "$GH_REPO" --json title --jq '.title') \
+    || die "Failed to fetch GitHub issue"
+
+[[ -n "$ISSUE_TITLE" ]] || die "Could not read issue title"
+echo "Issue title: $ISSUE_TITLE"
+
+# ── Find active sprint ────────────────────────────────────────────────────────
+echo "Looking up active sprint for board $BOARD_ID..."
+SPRINT_JSON=$(jira_get "/rest/agile/1.0/board/$BOARD_ID/sprint?state=active") \
+    || die "Failed to fetch sprints"
+
+SPRINT_ID=$(echo "$SPRINT_JSON" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+values = data.get('values', [])
+if not values:
+    print('', end='')
+else:
+    print(values[0]['id'], end='')
+")
+[[ -n "$SPRINT_ID" ]] || die "No active sprint found for board $BOARD_ID"
+echo "Active sprint ID: $SPRINT_ID"
+
+# ── Search for Jira ticket (with retries) ─────────────────────────────────────
+# Build JQL (Python handles any quoting in the title)
+JQL=$(python3 -c "
+import sys
+title = sys.argv[1]
+escaped = title.replace('\\\\', '\\\\\\\\').replace('\"', '\\\\\"')
+print('project = \"UDENG\" AND summary ~ \"{}\" AND reporter = \"STS API\"'.format(escaped))
+" "$ISSUE_TITLE")
+
+echo "Searching for Jira ticket (will retry for up to ${RETRY_TIMEOUT}s)..."
+
+JIRA_ISSUE_KEY=""
+DEADLINE=$(( $(date +%s) + RETRY_TIMEOUT ))
+
+while true; do
+    ENCODED_JQL=$(python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1]))" "$JQL")
+    SEARCH_RESULT=$(jira_get "/rest/api/3/search/jql?jql=$ENCODED_JQL&fields=summary,status,assignee&maxResults=5") \
+        || die "Failed to query Jira"
+
+    # Look for an issue whose summary matches exactly (case-insensitive)
+    JIRA_ISSUE_KEY=$(echo "$SEARCH_RESULT" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+target = sys.argv[1].lower()
+for issue in data.get('issues', []):
+    if issue['fields']['summary'].lower() == target:
+        print(issue['key'])
+        break
+" "$ISSUE_TITLE")
+
+    if [[ -n "$JIRA_ISSUE_KEY" ]]; then
+        break
+    fi
+
+    NOW=$(date +%s)
+    if (( NOW >= DEADLINE )); then
+        die "Jira ticket not found within ${RETRY_TIMEOUT}s (title: \"$ISSUE_TITLE\", reporter: STS API)"
+    fi
+    echo "  Not found yet, retrying in ${RETRY_INTERVAL}s..."
+    sleep "$RETRY_INTERVAL"
+done
+
+echo "Found Jira ticket: $JIRA_ISSUE_KEY"
+
+# ── Get current user's account ID ────────────────────────────────────────────
+MY_ACCOUNT_ID=$(jira_get "/rest/api/3/myself" | python3 -c "import sys,json; print(json.load(sys.stdin)['accountId'])") \
+    || die "Failed to get current user info"
+
+# ── Assign ticket to current user ─────────────────────────────────────────────
+echo "Assigning $JIRA_ISSUE_KEY to yourself..."
+jira_put "/rest/api/3/issue/$JIRA_ISSUE_KEY/assignee" \
+    "{\"accountId\": \"$MY_ACCOUNT_ID\"}" > /dev/null
+echo "  Done."
+
+# ── Add ticket to active sprint ───────────────────────────────────────────────
+echo "Adding $JIRA_ISSUE_KEY to sprint $SPRINT_ID..."
+jira_post "/rest/agile/1.0/sprint/$SPRINT_ID/issue" \
+    "{\"issues\": [\"$JIRA_ISSUE_KEY\"]}" > /dev/null
+echo "  Done."
+
+# ── Transition to In Progress ─────────────────────────────────────────────────
+echo "Fetching available transitions..."
+TRANSITIONS=$(jira_get "/rest/api/3/issue/$JIRA_ISSUE_KEY/transitions") \
+    || die "Failed to fetch transitions"
+
+TRANSITION_ID=$(echo "$TRANSITIONS" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+for t in data.get('transitions', []):
+    if t['name'].lower() == 'in progress':
+        print(t['id'])
+        break
+")
+
+[[ -n "$TRANSITION_ID" ]] || die "Could not find 'In Progress' transition for $JIRA_ISSUE_KEY"
+
+echo "Transitioning $JIRA_ISSUE_KEY to In Progress..."
+jira_post "/rest/api/3/issue/$JIRA_ISSUE_KEY/transitions" \
+    "{\"transition\": {\"id\": \"$TRANSITION_ID\"}}" > /dev/null
+echo "  Done."
+
+echo ""
+echo "✓ $JIRA_ISSUE_KEY is assigned to you, in the active sprint, and In Progress."
+echo "  $JIRA_SERVER/browse/$JIRA_ISSUE_KEY"
