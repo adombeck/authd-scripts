@@ -14,10 +14,11 @@ RETRY_INTERVAL=3
 
 usage() {
     cat <<EOF
-Usage: $0 <github-issue-url>
+Usage: $0 <github-issue-url-or-jira-issue-url>
 
-Finds the Jira ticket created from the given GitHub issue (matched by title,
-reported by "STS API"), then:
+If given a GitHub issue URL, finds the matching Jira ticket (matched by title,
+reported by "STS API"). If given a Jira issue URL or issue key directly, uses
+it as-is. Then:
   - Assigns it to you
   - Adds it to the active sprint
   - Transitions it to "In Progress"
@@ -33,7 +34,7 @@ if [[ $# -ne 1 ]]; then
     exit 1
 fi
 
-GITHUB_ISSUE_URL="$1"
+INPUT="$1"
 
 # ── Read credentials ──────────────────────────────────────────────────────────
 [[ -f "$CREDENTIALS_FILE" ]] || die "Credentials file not found: $CREDENTIALS_FILE"
@@ -75,22 +76,79 @@ jira_put() {
         "$JIRA_SERVER$path"
 }
 
-# ── Fetch GitHub issue title ──────────────────────────────────────────────────
-echo "Fetching GitHub issue: $GITHUB_ISSUE_URL"
+# ── Resolve Jira issue key ────────────────────────────────────────────────────
 
-# Accept both https://github.com/owner/repo/issues/N and plain owner/repo#N forms
-if [[ "$GITHUB_ISSUE_URL" =~ github\.com/([^/]+)/([^/]+)/issues/([0-9]+) ]]; then
-    GH_REPO="${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
-    GH_ISSUE_NUMBER="${BASH_REMATCH[3]}"
+# Check if input is a Jira URL or plain issue key (e.g. UDENG-123)
+if [[ "$INPUT" =~ atlassian\.net/browse/([A-Z]+-[0-9]+) ]]; then
+    JIRA_ISSUE_KEY="${BASH_REMATCH[1]}"
+    echo "Using Jira issue key from URL: $JIRA_ISSUE_KEY"
+elif [[ "$INPUT" =~ ^[A-Z]+-[0-9]+$ ]]; then
+    JIRA_ISSUE_KEY="$INPUT"
+    echo "Using Jira issue key: $JIRA_ISSUE_KEY"
 else
-    die "Unrecognised GitHub issue URL: $GITHUB_ISSUE_URL"
+    GITHUB_ISSUE_URL="$INPUT"
+
+    # ── Fetch GitHub issue title ──────────────────────────────────────────────────
+    echo "Fetching GitHub issue: $GITHUB_ISSUE_URL"
+
+    # Accept both https://github.com/owner/repo/issues/N and plain owner/repo#N forms
+    if [[ "$GITHUB_ISSUE_URL" =~ github\.com/([^/]+)/([^/]+)/issues/([0-9]+) ]]; then
+        GH_REPO="${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+        GH_ISSUE_NUMBER="${BASH_REMATCH[3]}"
+    else
+        die "Unrecognised input: expected a Jira issue URL, Jira issue key, or GitHub issue URL"
+    fi
+
+    ISSUE_TITLE=$(gh issue view "$GH_ISSUE_NUMBER" --repo "$GH_REPO" --json title --jq '.title') \
+        || die "Failed to fetch GitHub issue"
+
+    [[ -n "$ISSUE_TITLE" ]] || die "Could not read issue title"
+    echo "Issue title: $ISSUE_TITLE"
+
+    # ── Search for Jira ticket (with retries) ─────────────────────────────────────
+    # Build JQL (Python handles any quoting in the title)
+    JQL=$(python3 -c "
+import sys
+title = sys.argv[1]
+escaped = title.replace('\\\\', '\\\\\\\\').replace('\"', '\\\\\"')
+print('project = \"UDENG\" AND summary ~ \"{}\" AND reporter = \"STS API\"'.format(escaped))
+" "$ISSUE_TITLE")
+
+    echo "Searching for Jira ticket (will retry for up to ${RETRY_TIMEOUT}s)..."
+
+    JIRA_ISSUE_KEY=""
+    DEADLINE=$(( $(date +%s) + RETRY_TIMEOUT ))
+
+    while true; do
+        ENCODED_JQL=$(python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1]))" "$JQL")
+        SEARCH_RESULT=$(jira_get "/rest/api/3/search/jql?jql=$ENCODED_JQL&fields=summary,status,assignee&maxResults=5") \
+            || die "Failed to query Jira"
+
+        # Look for an issue whose summary matches exactly (case-insensitive)
+        JIRA_ISSUE_KEY=$(echo "$SEARCH_RESULT" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+target = sys.argv[1].lower()
+for issue in data.get('issues', []):
+    if issue['fields']['summary'].lower() == target:
+        print(issue['key'])
+        break
+" "$ISSUE_TITLE")
+
+        if [[ -n "$JIRA_ISSUE_KEY" ]]; then
+            break
+        fi
+
+        NOW=$(date +%s)
+        if (( NOW >= DEADLINE )); then
+            die "Jira ticket not found within ${RETRY_TIMEOUT}s (title: \"$ISSUE_TITLE\", reporter: STS API)"
+        fi
+        echo "  Not found yet, retrying in ${RETRY_INTERVAL}s..."
+        sleep "$RETRY_INTERVAL"
+    done
+
+    echo "Found Jira ticket: $JIRA_ISSUE_KEY"
 fi
-
-ISSUE_TITLE=$(gh issue view "$GH_ISSUE_NUMBER" --repo "$GH_REPO" --json title --jq '.title') \
-    || die "Failed to fetch GitHub issue"
-
-[[ -n "$ISSUE_TITLE" ]] || die "Could not read issue title"
-echo "Issue title: $ISSUE_TITLE"
 
 # ── Find active sprint ────────────────────────────────────────────────────────
 echo "Looking up active sprint for board $BOARD_ID..."
@@ -108,50 +166,6 @@ else:
 ")
 [[ -n "$SPRINT_ID" ]] || die "No active sprint found for board $BOARD_ID"
 echo "Active sprint ID: $SPRINT_ID"
-
-# ── Search for Jira ticket (with retries) ─────────────────────────────────────
-# Build JQL (Python handles any quoting in the title)
-JQL=$(python3 -c "
-import sys
-title = sys.argv[1]
-escaped = title.replace('\\\\', '\\\\\\\\').replace('\"', '\\\\\"')
-print('project = \"UDENG\" AND summary ~ \"{}\" AND reporter = \"STS API\"'.format(escaped))
-" "$ISSUE_TITLE")
-
-echo "Searching for Jira ticket (will retry for up to ${RETRY_TIMEOUT}s)..."
-
-JIRA_ISSUE_KEY=""
-DEADLINE=$(( $(date +%s) + RETRY_TIMEOUT ))
-
-while true; do
-    ENCODED_JQL=$(python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1]))" "$JQL")
-    SEARCH_RESULT=$(jira_get "/rest/api/3/search/jql?jql=$ENCODED_JQL&fields=summary,status,assignee&maxResults=5") \
-        || die "Failed to query Jira"
-
-    # Look for an issue whose summary matches exactly (case-insensitive)
-    JIRA_ISSUE_KEY=$(echo "$SEARCH_RESULT" | python3 -c "
-import sys, json
-data = json.load(sys.stdin)
-target = sys.argv[1].lower()
-for issue in data.get('issues', []):
-    if issue['fields']['summary'].lower() == target:
-        print(issue['key'])
-        break
-" "$ISSUE_TITLE")
-
-    if [[ -n "$JIRA_ISSUE_KEY" ]]; then
-        break
-    fi
-
-    NOW=$(date +%s)
-    if (( NOW >= DEADLINE )); then
-        die "Jira ticket not found within ${RETRY_TIMEOUT}s (title: \"$ISSUE_TITLE\", reporter: STS API)"
-    fi
-    echo "  Not found yet, retrying in ${RETRY_INTERVAL}s..."
-    sleep "$RETRY_INTERVAL"
-done
-
-echo "Found Jira ticket: $JIRA_ISSUE_KEY"
 
 # ── Get current user's account ID ────────────────────────────────────────────
 MY_ACCOUNT_ID=$(jira_get "/rest/api/3/myself" | python3 -c "import sys,json; print(json.load(sys.stdin)['accountId'])") \
