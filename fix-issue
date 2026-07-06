@@ -1,0 +1,147 @@
+#!/usr/bin/env python3
+"""
+fix-issue - create a worktree and launch Copilot CLI for a GitHub or Jira issue.
+
+Usage: fix-issue <github-or-jira-issue-url>
+
+Supports:
+  https://github.com/owner/repo/issues/123
+  https://<jira-host>/browse/PROJ-1234
+"""
+
+import base64
+import json
+import re
+import subprocess
+import sys
+import time
+import urllib.request
+from pathlib import Path
+
+AUTHD_REPO = Path("~/projects/authd").expanduser()
+
+GUAKE_DBUS_DEST = "org.guake3.RemoteControl"
+GUAKE_DBUS_OBJECT = "/org/guake3/RemoteControl"
+GUAKE_DBUS_IFACE = "org.guake3.RemoteControl"
+
+GITHUB_ISSUE_URL_RE = re.compile(r'https://github\.com/([^/]+)/([^/]+)/issues/(\d+)')
+JIRA_ISSUE_URL_RE = re.compile(r'(https://[^/]+)/browse/([A-Z]+-\d+)')
+
+JIRA_CREDENTIALS_FILE = Path("~/.jira_credentials").expanduser()
+
+
+def die(msg):
+    print(f"Error: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def slugify(text):
+    """Convert text to a branch-name-safe slug."""
+    text = text.lower()
+    text = re.sub(r'[^a-z0-9]+', '-', text)
+    text = text.strip('-')
+    if len(text) > 60:
+        text = text[:60].rstrip('-')
+    return text
+
+
+def get_github_issue_title(owner, repo, number):
+    result = subprocess.run(
+        ["gh", "issue", "view", number, "--repo", f"{owner}/{repo}",
+         "--json", "title", "--jq", ".title"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        die(f"Failed to fetch GitHub issue: {result.stderr.strip()}")
+    return result.stdout.strip()
+
+
+def get_jira_issue_summary(jira_server, issue_key):
+    if not JIRA_CREDENTIALS_FILE.exists():
+        die(f"Jira credentials file not found: {JIRA_CREDENTIALS_FILE}")
+
+    token, email = None, None
+    for line in JIRA_CREDENTIALS_FILE.read_text().splitlines():
+        if line.startswith('token:'):
+            token = line.split(':', 1)[1].strip().strip('"')
+        elif line.startswith('user:'):
+            email = line.split(':', 1)[1].strip().strip('"')
+
+    if not token or not email:
+        die("Missing Jira credentials (token or user) in ~/.jira_credentials")
+
+    auth = base64.b64encode(f"{email}:{token}".encode()).decode()
+    url = f"{jira_server}/rest/api/3/issue/{issue_key}?fields=summary"
+    req = urllib.request.Request(url, headers={
+        "Authorization": f"Basic {auth}",
+        "Accept": "application/json",
+    })
+    try:
+        with urllib.request.urlopen(req) as resp:
+            return json.load(resp)["fields"]["summary"]
+    except Exception as e:
+        die(f"Failed to fetch Jira issue {issue_key}: {e}")
+
+
+def guake_call(method, *args):
+    subprocess.run(
+        ["gdbus", "call", "--session",
+         "--dest", GUAKE_DBUS_DEST,
+         "--object-path", GUAKE_DBUS_OBJECT,
+         "--method", f"{GUAKE_DBUS_IFACE}.{method}"] + list(args),
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+
+
+def main():
+    if len(sys.argv) != 2 or sys.argv[1] in ('-h', '--help'):
+        print(__doc__.strip(), file=sys.stderr)
+        sys.exit(0 if sys.argv[1:] == ['-h', '--help'] else 1)
+
+    url = sys.argv[1]
+
+    github_match = GITHUB_ISSUE_URL_RE.match(url)
+    jira_match = JIRA_ISSUE_URL_RE.match(url)
+
+    if github_match:
+        owner, repo, number = github_match.groups()
+        print(f"Fetching GitHub issue #{number} from {owner}/{repo}...")
+        title = get_github_issue_title(owner, repo, number)
+        issue_key = number
+    elif jira_match:
+        jira_server, issue_key = jira_match.groups()
+        print(f"Fetching Jira issue {issue_key}...")
+        title = get_jira_issue_summary(jira_server, issue_key)
+    else:
+        die(f"Unrecognised issue URL: {url}\n"
+            "Expected a GitHub or Jira issue URL.")
+
+    print(f"Title: {title}")
+
+    branch_name = f"{issue_key}-{slugify(title)}"
+    print(f"Branch name: {branch_name}")
+
+    worktree_dirname = branch_name.replace('/', '-')
+    worktree_path = AUTHD_REPO.parent / f"authd-{worktree_dirname}"
+
+    print(f"Creating worktree at {worktree_path}...")
+    result = subprocess.run(["authd-worktree", branch_name], cwd=AUTHD_REPO)
+    if result.returncode != 0:
+        die("Failed to create worktree")
+
+    print(f"Opening Guake tab at {worktree_path}...")
+    guake_call("add_tab", str(worktree_path))
+
+    # Give Guake a moment to open and focus the new tab before sending a command.
+    time.sleep(0.5)
+
+    copilot_cmd = f"copilot --autopilot --allow-all -i 'Fix the issue at {url}'\n"
+    guake_call("execute_command", copilot_cmd)
+
+    guake_call("show")
+
+    print(f"Done! Copilot launched in new Guake tab for {url}")
+
+
+if __name__ == "__main__":
+    main()
