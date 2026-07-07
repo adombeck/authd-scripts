@@ -81,8 +81,9 @@ fi
 set -x
 
 # Export uncommitted changes from the source repo.
-git diff > /tmp/uncommitted.patch
-git diff --staged >> /tmp/uncommitted.patch
+# Staged diff first (creates new files), then unstaged (modifies them).
+git diff --staged > /tmp/uncommitted.patch
+git diff >> /tmp/uncommitted.patch
 
 if [ -n "${IN_PLACE}" ] && [ -d "${BUILD_DIR}/.git" ]; then
     # Refresh the existing build directory in place to keep its inode stable.
