@@ -87,7 +87,7 @@ git diff --staged >> /tmp/uncommitted.patch
 if [ -n "${IN_PLACE}" ] && [ -d "${BUILD_DIR}/.git" ]; then
     # Refresh the existing build directory in place to keep its inode stable.
     cd "${BUILD_DIR}"
-    git fetch --quiet "${GIT_ROOT_DIR}" HEAD
+    git fetch --quiet "${GIT_ROOT_DIR}" HEAD${ENSURE_MAIN:+ main}
     # Seed each existing submodule's object store from the matching submodule in
     # the source repo before the outer checkout below tries to update it. The
     # source checkout always has every commit we have checked out locally, even
