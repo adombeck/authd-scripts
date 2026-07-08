@@ -189,7 +189,17 @@ _seed_intellij_idea() {
 
     echo "Seeding IntelliJ .idea/ directory..."
     cp -r "$_SII_SRC_IDEA" "$_SII_DST_IDEA"
-    rm -f "$_SII_DST_IDEA/workspace.xml"
+
+    # Rebuild workspace.xml with only the GOROOT component; everything else is
+    # user session state (open files, breakpoints, run configs, …) and should
+    # start fresh per worktree.
+    _SII_GOROOT=$(grep 'component name="GOROOT"' "$_SII_SRC_IDEA/workspace.xml" 2>/dev/null)
+    if [ -n "$_SII_GOROOT" ]; then
+        printf '<?xml version="1.0" encoding="UTF-8"?>\n<project version="4">\n  %s\n</project>\n' \
+            "$_SII_GOROOT" > "$_SII_DST_IDEA/workspace.xml"
+    else
+        rm -f "$_SII_DST_IDEA/workspace.xml"
+    fi
 
     # Rename the .iml file and update the reference in modules.xml.
     _SII_SRC_NAME=$(basename "$_SII_SOURCE")
