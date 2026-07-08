@@ -119,6 +119,54 @@ setup_submodule_from_worktree() {
     _submod_linked_gitdir "$_SWFT_MSG" "$_SWFT_WTG" "$_SWFT_CKO" "$_SWFT_COMMIT"
 }
 
+# _seed_intellij_cache <source-abs-path> <dest-abs-path>
+#
+# Copies the IntelliJ project index cache from an existing worktree to the new
+# one so IntelliJ doesn't have to reindex from scratch. JetBrains names the
+# cache directory <basename>.<hash> where <hash> is the Java String.hashCode()
+# of the absolute project path, formatted as 8 lowercase hex digits.
+# Silently skips if python3 is unavailable, no IntelliJ cache exists, or the
+# source cache directory hasn't been created yet (i.e. source never opened).
+_seed_intellij_cache() {
+    _SIC_SOURCE="$1"
+    _SIC_DEST="$2"
+
+    if ! command -v python3 >/dev/null 2>&1; then
+        return 0
+    fi
+
+    _SIC_CACHE_BASE=$(ls -dt "$HOME/.cache/JetBrains/IntelliJIdea"*/projects 2>/dev/null | head -1)
+    if [ -z "$_SIC_CACHE_BASE" ]; then
+        return 0
+    fi
+
+    _jb_hash() {
+        python3 -c "
+h = 0
+for c in '$1':
+    h = (31 * h + ord(c)) & 0xFFFFFFFF
+print(f'{h:08x}')
+"
+    }
+
+    _SIC_SRC_HASH=$(_jb_hash "$_SIC_SOURCE")
+    _SIC_DST_HASH=$(_jb_hash "$_SIC_DEST")
+
+    _SIC_SRC_DIR="${_SIC_CACHE_BASE}/$(basename "$_SIC_SOURCE").${_SIC_SRC_HASH}"
+    _SIC_DST_DIR="${_SIC_CACHE_BASE}/$(basename "$_SIC_DEST").${_SIC_DST_HASH}"
+
+    if [ ! -d "$_SIC_SRC_DIR" ]; then
+        return 0
+    fi
+
+    if [ -d "$_SIC_DST_DIR" ]; then
+        return 0
+    fi
+
+    echo "Seeding IntelliJ index cache..."
+    cp -r "$_SIC_SRC_DIR" "$_SIC_DST_DIR"
+}
+
 create_worktree() {
     branch="$1"
     worktree_dirname=$(printf '%s' "$branch" | tr '/' '-')
@@ -161,6 +209,8 @@ create_worktree() {
             | while IFS= read -r SUBMOD; do
                 setup_submodule "$MAINREPO" "$WORKSPACE_ABS" "$WORKTREE_NAME" "$SUBMOD"
             done
+
+            _seed_intellij_cache "$MAINREPO" "$WORKSPACE_ABS"
         fi
     ) || return 1
 
