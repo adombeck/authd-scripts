@@ -15,7 +15,6 @@ import re
 import shlex
 import subprocess
 import sys
-import time
 import urllib.request
 from pathlib import Path
 
@@ -130,12 +129,14 @@ def main():
     if result.returncode != 0:
         die("Failed to create worktree")
 
-    print(f"Opening Guake tab at {worktree_path}...")
-    guake_call("add_tab", str(worktree_path))
+    print(f"Opening Guake tab for {worktree_path}...")
 
-    # Give Guake a moment to open and focus the new tab before sending a command.
-    time.sleep(0.5)
-
+    # Open a new Guake tab in the worktree directory with the Copilot prompt
+    # pre-filled. Using a single execute_command (with an explicit cd) rather
+    # than add_tab + execute_command avoids a race condition where
+    # execute_command fires before the new tab has been focused, which would
+    # send the command to the wrong terminal and leave an empty extra tab open.
+    #
     # Guake's execute_command always runs the line immediately, so we can't
     # just leave a command sitting at the prompt. Instead we run a shell
     # snippet that pre-fills an *editable* input buffer with the prompt. You
@@ -146,11 +147,12 @@ def main():
     # instead, so detect the shell at runtime and use the right one.
     prompt = f"Fix the issue at {url}"
     q = shlex.quote(prompt)
+    w = shlex.quote(str(worktree_path))
     # Prefix the command with a space so it isn't recorded in the shell
     # history (requires HISTCONTROL=ignorespace/ignoreboth in bash or
     # setopt HIST_IGNORE_SPACE in zsh, which is a common default).
     launch = (
-        " clear; "
+        " cd {worktree}; clear; "
         "_p={prompt}; "
         "if [ -n \"$ZSH_VERSION\" ]; then "
         "vared -p $'Edit prompt, then press Enter:\\n' _p; "
@@ -158,7 +160,7 @@ def main():
         "read -e -i \"$_p\" -p $'Edit prompt, then press Enter:\\n' _p; "
         "fi && "
         "copilot --autopilot --allow-all -i \"$_p\""
-    ).format(prompt=q)
+    ).format(worktree=w, prompt=q)
     guake_call("execute_command", launch + "\n")
 
     guake_call("show")
