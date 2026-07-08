@@ -167,6 +167,45 @@ print(f'{h:08x}')
     cp -r "$_SIC_SRC_DIR" "$_SIC_DST_DIR"
 }
 
+# _seed_intellij_idea <source-abs-path> <dest-abs-path>
+#
+# Copies the .idea/ directory from source to dest, adapting the .iml filename
+# to match the new project name. Excludes workspace.xml (user session state).
+# Skips silently if the source has no .idea/ or the dest already has one.
+_seed_intellij_idea() {
+    _SII_SOURCE="$1"
+    _SII_DEST="$2"
+
+    _SII_SRC_IDEA="$_SII_SOURCE/.idea"
+    _SII_DST_IDEA="$_SII_DEST/.idea"
+
+    if [ ! -d "$_SII_SRC_IDEA" ]; then
+        return 0
+    fi
+
+    if [ -d "$_SII_DST_IDEA" ]; then
+        return 0
+    fi
+
+    echo "Seeding IntelliJ .idea/ directory..."
+    cp -r "$_SII_SRC_IDEA" "$_SII_DST_IDEA"
+    rm -f "$_SII_DST_IDEA/workspace.xml"
+
+    # Rename the .iml file and update the reference in modules.xml.
+    _SII_SRC_NAME=$(basename "$_SII_SOURCE")
+    _SII_DST_NAME=$(basename "$_SII_DEST")
+    _SII_SRC_IML="$_SII_DST_IDEA/${_SII_SRC_NAME}.iml"
+    _SII_DST_IML="$_SII_DST_IDEA/${_SII_DST_NAME}.iml"
+
+    if [ -f "$_SII_SRC_IML" ]; then
+        mv "$_SII_SRC_IML" "$_SII_DST_IML"
+        _SII_MODULES="$_SII_DST_IDEA/modules.xml"
+        if [ -f "$_SII_MODULES" ]; then
+            sed -i "s/${_SII_SRC_NAME}\.iml/${_SII_DST_NAME}.iml/g" "$_SII_MODULES"
+        fi
+    fi
+}
+
 create_worktree() {
     branch="$1"
     worktree_dirname=$(printf '%s' "$branch" | tr '/' '-')
@@ -211,6 +250,7 @@ create_worktree() {
             done
 
             _seed_intellij_cache "$MAINREPO" "$WORKSPACE_ABS"
+            _seed_intellij_idea "$MAINREPO" "$WORKSPACE_ABS"
         fi
     ) || return 1
 
