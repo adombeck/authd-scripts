@@ -12,6 +12,7 @@ Supports:
 import base64
 import json
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -135,12 +136,35 @@ def main():
     # Give Guake a moment to open and focus the new tab before sending a command.
     time.sleep(0.5)
 
-    copilot_cmd = f"copilot --autopilot --allow-all -i 'Fix the issue at {url}'\n"
-    guake_call("execute_command", copilot_cmd)
+    # Guake's execute_command always runs the line immediately, so we can't
+    # just leave a command sitting at the prompt. Instead we run a shell
+    # snippet that pre-fills an *editable* input buffer with the prompt. You
+    # can edit the text and press Enter when ready; only then does Copilot
+    # actually run with your (possibly edited) prompt.
+    #
+    # bash uses `read -e -i`; zsh doesn't support that and uses `vared`
+    # instead, so detect the shell at runtime and use the right one.
+    prompt = f"Fix the issue at {url}"
+    q = shlex.quote(prompt)
+    # Prefix the command with a space so it isn't recorded in the shell
+    # history (requires HISTCONTROL=ignorespace/ignoreboth in bash or
+    # setopt HIST_IGNORE_SPACE in zsh, which is a common default).
+    launch = (
+        " clear; "
+        "_p={prompt}; "
+        "if [ -n \"$ZSH_VERSION\" ]; then "
+        "vared -p $'Edit prompt, then press Enter:\\n' _p; "
+        "else "
+        "read -e -i \"$_p\" -p $'Edit prompt, then press Enter:\\n' _p; "
+        "fi && "
+        "copilot --autopilot --allow-all -i \"$_p\""
+    ).format(prompt=q)
+    guake_call("execute_command", launch + "\n")
 
     guake_call("show")
 
-    print(f"Done! Copilot launched in new Guake tab for {url}")
+    print(f"Done! Prompt staged in new Guake tab for {url}. "
+          "Edit it if needed, then press Enter to run Copilot.")
 
 
 if __name__ == "__main__":
