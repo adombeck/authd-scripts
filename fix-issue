@@ -40,8 +40,8 @@ def slugify(text):
     text = text.lower()
     text = re.sub(r'[^a-z0-9]+', '-', text)
     text = text.strip('-')
-    if len(text) > 60:
-        text = text[:60].rstrip('-')
+    if len(text) > 30:
+        text = text[:30].rstrip('-')
     return text
 
 
