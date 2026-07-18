@@ -156,7 +156,7 @@ fi
 # ------------------------------------------------------------------
 
 # Find the most recently built authd deb in the build dir
-AUTHD_DEB="$(ls -t "${BUILD_DIR}"/authd_*_amd64.deb 2>/dev/null | head -n1)"
+AUTHD_DEB="$(find "${BUILD_DIR}" -maxdepth 1 -type f -name 'authd_*_amd64.deb' -printf '%T@ %p\n' | sort -nr | head -n1 | cut -d' ' -f2-)"
 if [[ -z "${AUTHD_DEB}" ]]; then
     echo >&2 "No authd deb found in ${BUILD_DIR}. Build one first with --build authd."
     exit 1
@@ -166,7 +166,7 @@ fi
 BROKER_SNAP=""
 if [[ -n "${BROKER:-}" ]]; then
     BROKER_SHORT="${BROKER#authd-}"
-    BROKER_SNAP="$(ls -t "${BUILD_DIR}"/authd-"${BROKER_SHORT}"_*.snap 2>/dev/null | head -n1)"
+    BROKER_SNAP="$(find "${BUILD_DIR}" -maxdepth 1 -type f -name "authd-${BROKER_SHORT}_*.snap" -printf '%T@ %p\n' | sort -nr | head -n1 | cut -d' ' -f2-)"
     if [[ -z "${BROKER_SNAP}" ]]; then
         echo >&2 "No ${BROKER} snap found in ${BUILD_DIR}. Build one first with --build broker."
         exit 1
