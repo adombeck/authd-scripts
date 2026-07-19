@@ -145,6 +145,25 @@ print(f'{h:08x}')
     done
 }
 
+# _reset_intellij_vcs_mapping <project-abs-path>
+#
+# A copied .idea/vcs.xml can retain a VCS root from its source worktree. Keep
+# only the current project root, which is the Git root for every worktree.
+_reset_intellij_vcs_mapping() {
+    _RIVM_PROJECT="$1"
+    _RIVM_IDEA="$_RIVM_PROJECT/.idea"
+
+    [ -d "$_RIVM_IDEA" ] || return 0
+
+    printf '%s\n' \
+        '<?xml version="1.0" encoding="UTF-8"?>' \
+        '<project version="4">' \
+        '  <component name="VcsDirectoryMappings">' \
+        '    <mapping directory="" vcs="Git" />' \
+        '  </component>' \
+        '</project>' > "$_RIVM_IDEA/vcs.xml"
+}
+
 # _seed_intellij_idea <source-abs-path> <dest-abs-path>
 #
 # Copies the .idea/ directory from source to dest, adapting the .iml filename
@@ -230,8 +249,6 @@ create_worktree() {
             WORKSPACE_ABS="$(cd "$workspace" && pwd)"
             WORKTREE_NAME="$(basename "$WORKSPACE_ABS")"
 
-            _clear_intellij_cache "$WORKSPACE_ABS"
-
             # Set up each submodule declared in the new worktree.
             git config --file "$WORKSPACE_ABS/.gitmodules" --get-regexp 'submodule\..*\.path' \
             | awk '{print $2}' \
@@ -241,6 +258,10 @@ create_worktree() {
 
             _seed_intellij_idea "$MAINREPO" "$WORKSPACE_ABS"
         fi
+
+        WORKSPACE_ABS="$(cd "$workspace" && pwd)"
+        _clear_intellij_cache "$WORKSPACE_ABS"
+        _reset_intellij_vcs_mapping "$WORKSPACE_ABS"
     ) || return 1
 
     cd "$workspace" || return 1
