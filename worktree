@@ -189,8 +189,24 @@ _seed_intellij_idea() {
 
     # Rebuild workspace.xml with only the GOROOT component; everything else is
     # user session state (open files, breakpoints, run configs, …) and should
-    # start fresh per worktree.
-    _SII_GOROOT=$(grep 'component name="GOROOT"' "$_SII_SRC_IDEA/workspace.xml" 2>/dev/null)
+    # start fresh per worktree. IntelliJ writes this component over multiple
+    # lines, so copy it through its closing tag rather than just its first line.
+    _SII_GOROOT=$(awk '
+        /<component[[:space:]][^>]*name="GOROOT"/ {
+            print
+            if ($0 ~ /\/>/) {
+                exit
+            }
+            copying = 1
+            next
+        }
+        copying {
+            print
+            if (/<\/component>/) {
+                exit
+            }
+        }
+    ' "$_SII_SRC_IDEA/workspace.xml" 2>/dev/null)
     if [ -n "$_SII_GOROOT" ]; then
         printf '<?xml version="1.0" encoding="UTF-8"?>\n<project version="4">\n  %s\n</project>\n' \
             "$_SII_GOROOT" > "$_SII_DST_IDEA/workspace.xml"
