@@ -37,9 +37,8 @@ fi
 sudo lxc config device remove u24 workdir
 sudo lxc config device add u24 workdir disk source="$PWD" path=/src
 
-if ! sudo lxc info u24 | grep -q "Status: RUNNING"; then
-    sudo lxc start u24
-fi
+sudo lxc restart u24
+sudo lxc exec --cwd /src u24 -- test -f Cargo.toml
 sudo lxc exec --cwd /src u24 -- sh -c "cargo generate-lockfile"
 
 git add Cargo.lock
