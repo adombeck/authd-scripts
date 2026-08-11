@@ -1,0 +1,71 @@
+#!/bin/bash
+
+set -euo pipefail
+
+usage() {
+    cat << EOF
+Usage: $0 [--snap-src-dir <dir>]
+
+Removes the shared build directory used by build-broker-snap, along with any
+LXD build instances snapcraft created for it.
+
+snapcraft names its LXD build instance after the build directory's inode (see
+create-build-dir --in-place), and the same build directory is shared across
+all brokers (oidc, msentraid, google) and all worktrees. So instead of a plain
+'rm -rf' on the build directory -- which leaves its LXD instance(s) behind as
+orphaned, stopped containers under the 'snapcraft' LXD project -- this script
+looks up the directory's current inode, deletes every LXD instance whose name
+ends in that inode, and only then removes the directory.
+
+Run this when a build-broker-snap build is stuck/broken and you want to reset
+its cache from scratch.
+
+Options:
+  --snap-src-dir <dir>
+      The build directory to remove. Must match the --snap-src-dir value (or
+      its default) used with build-broker-snap.
+      Defaults to ~/projects/build/authd-broker-snap.
+  -h, --help
+      Show this help message
+EOF
+}
+
+SNAP_SRC_DIR="${HOME}/projects/build/authd-broker-snap"
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --snap-src-dir)
+            SNAP_SRC_DIR="$2"
+            shift 2
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo >&2 "Unknown option: $1"
+            usage
+            exit 1
+            ;;
+    esac
+done
+
+if [ ! -d "${SNAP_SRC_DIR}" ]; then
+    echo "Build directory '${SNAP_SRC_DIR}' does not exist, nothing to clean."
+    exit 0
+fi
+
+inode=$(stat -c '%i' "${SNAP_SRC_DIR}")
+
+set -x
+
+# Delete every LXD instance (across all brokers) tied to this build
+# directory's inode before removing the directory itself, so we don't leave
+# orphaned containers behind.
+lxc list --project snapcraft -c n -f csv \
+    | grep -- "-${inode}\$" \
+    | while read -r instance; do
+        lxc delete --project snapcraft --force "${instance}"
+    done
+
+rm -rf "${SNAP_SRC_DIR}"
