@@ -3,10 +3,11 @@
 address-review-comment - create/open a worktree and launch Copilot CLI to
 address a single GitHub PR review comment.
 
-Usage: address-review-comment <github-pr-review-comment-url>
+Usage: address-review-comment <github-pr-comment-url>
 
 Supports:
   https://github.com/owner/repo/pull/123#discussion_r456789
+  https://github.com/owner/repo/pull/123#issuecomment-456789
 """
 
 import re
@@ -23,6 +24,10 @@ GUAKE_DBUS_IFACE = "org.guake3.RemoteControl"
 
 REVIEW_COMMENT_URL_RE = re.compile(
     r'https://github\.com/([^/]+)/([^/]+)/pull/(\d+)#discussion_r(\d+)'
+)
+
+ISSUE_COMMENT_URL_RE = re.compile(
+    r'https://github\.com/([^/]+)/([^/]+)/pull/(\d+)#issuecomment-(\d+)'
 )
 
 
@@ -55,6 +60,19 @@ def get_review_comment(owner, repo, comment_id):
     return json.loads(result.stdout)
 
 
+def get_issue_comment(owner, repo, comment_id):
+    """Fetch a top-level (non-review) PR comment's body and author."""
+    result = subprocess.run(
+        ["gh", "api", f"repos/{owner}/{repo}/issues/comments/{comment_id}",
+         "--jq", '{body, user: .user.login}'],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        die(f"Failed to fetch issue comment {comment_id}: {result.stderr.strip()}")
+    import json
+    return json.loads(result.stdout)
+
+
 def get_pr_branch(owner, repo, number):
     return gh_api_json(
         f"repos/{owner}/{repo}/pulls/{number}",
@@ -80,23 +98,39 @@ def main():
     url = sys.argv[1]
 
     match = REVIEW_COMMENT_URL_RE.match(url)
-    if not match:
-        die(f"Unrecognised review comment URL: {url}\n"
-            "Expected e.g. https://github.com/owner/repo/pull/123#discussion_r456789")
+    if match:
+        owner, repo, number, comment_id = match.groups()
 
-    owner, repo, number, comment_id = match.groups()
+        print(f"Fetching review comment {comment_id} on {owner}/{repo}#{number}...")
+        comment = get_review_comment(owner, repo, comment_id)
 
-    print(f"Fetching review comment {comment_id} on {owner}/{repo}#{number}...")
-    comment = get_review_comment(owner, repo, comment_id)
+        line = comment.get("line") or comment.get("original_line")
+        path = comment["path"]
+        body = comment["body"]
+        reviewer = comment.get("user") or "a reviewer"
+        is_reply = comment.get("in_reply_to_id") is not None
 
-    line = comment.get("line") or comment.get("original_line")
-    path = comment["path"]
-    body = comment["body"]
-    reviewer = comment.get("user") or "a reviewer"
-    is_reply = comment.get("in_reply_to_id") is not None
+        print(f"File: {path}:{line}")
+        print(f"Reviewer: {reviewer}")
+    else:
+        match = ISSUE_COMMENT_URL_RE.match(url)
+        if not match:
+            die(f"Unrecognised PR comment URL: {url}\n"
+                "Expected e.g. https://github.com/owner/repo/pull/123#discussion_r456789 "
+                "or https://github.com/owner/repo/pull/123#issuecomment-456789")
 
-    print(f"File: {path}:{line}")
-    print(f"Reviewer: {reviewer}")
+        owner, repo, number, comment_id = match.groups()
+
+        print(f"Fetching issue comment {comment_id} on {owner}/{repo}#{number}...")
+        comment = get_issue_comment(owner, repo, comment_id)
+
+        line = None
+        path = None
+        body = comment["body"]
+        reviewer = comment.get("user") or "a reviewer"
+        is_reply = False
+
+        print(f"Reviewer: {reviewer}")
 
     print(f"Fetching branch for PR #{number}...")
     branch_name = get_pr_branch(owner, repo, number)
@@ -113,9 +147,10 @@ def main():
     print(f"Opening Guake tab for {worktree_path}...")
 
     reply_note = " (this is a reply further down an existing review thread)" if is_reply else ""
+    location_line = f"File: {path}, line: {line}\n" if path else ""
     prompt = (
         f"There's a reviewer comment from {reviewer} on {url}{reply_note}.\n"
-        f"File: {path}, line: {line}\n"
+        f"{location_line}"
         f"Comment: {body}\n"
     )
     q = shlex.quote(prompt)
