@@ -1,0 +1,138 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+DEFAULT_REPO_DIR="$HOME/projects/authd"
+DEFAULT_SINCE="2026-08-24T16:56:28Z"
+STATE_FILE="${AUTHD_JIRA_SYNC_STATE_FILE:-${XDG_STATE_HOME:-$HOME/.local/state}/authd-scripts/last-jira-sync}"
+
+usage() {
+    cat <<EOF
+Usage: $0 [--repo <directory>] [--since <ISO-8601 timestamp>]
+
+Start an interactive Copilot session that creates missing Jira issues for
+recent Jira-labeled issues in canonical/authd.
+
+Options:
+  --repo <directory>             Authd repository. Defaults to the current
+                                 repository when it contains the sync config,
+                                 otherwise $DEFAULT_REPO_DIR.
+  --since <timestamp>            Override the saved look-back timestamp.
+  -h, --help                     Show this help.
+
+The saved look-back timestamp is stored in:
+  $STATE_FILE
+EOF
+}
+
+die() {
+    echo "Error: $1" >&2
+    exit 1
+}
+
+if [[ -n "${AUTHD_REPO_DIR:-}" ]]; then
+    REPO_DIR="$AUTHD_REPO_DIR"
+elif [[ -f "$PWD/.github/.jira_sync_config.yaml" ]]; then
+    REPO_DIR="$PWD"
+else
+    REPO_DIR="$DEFAULT_REPO_DIR"
+fi
+
+SINCE_OVERRIDE=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --repo)
+            [[ $# -ge 2 ]] || die "--repo requires a directory"
+            REPO_DIR="$2"
+            shift 2
+            ;;
+        --since)
+            [[ $# -ge 2 ]] || die "--since requires an ISO-8601 timestamp"
+            SINCE_OVERRIDE="$2"
+            shift 2
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            die "unknown option: $1"
+            ;;
+    esac
+done
+
+command -v copilot >/dev/null || die "copilot was not found in PATH"
+[[ -d "$REPO_DIR" ]] || die "repository directory not found: $REPO_DIR"
+REPO_DIR="$(cd -- "$REPO_DIR" && pwd -P)"
+[[ -f "$REPO_DIR/.github/.jira_sync_config.yaml" ]] \
+    || die "sync config not found: $REPO_DIR/.github/.jira_sync_config.yaml"
+
+mkdir -p -- "$(dirname -- "$STATE_FILE")"
+
+if [[ -n "$SINCE_OVERRIDE" ]]; then
+    SINCE="$SINCE_OVERRIDE"
+elif [[ -s "$STATE_FILE" ]]; then
+    SINCE="$(<"$STATE_FILE")"
+else
+    SINCE="$DEFAULT_SINCE"
+fi
+
+[[ -n "$SINCE" ]] || die "look-back timestamp is empty"
+RUN_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+SESSION_NAME="GitHub-to-Jira sync $RUN_STARTED_AT"
+
+read -r -d '' PROMPT <<EOF || true
+Create the missing Jira issues for the recent GitHub issues in canonical/authd.
+Work directly and complete the API work; do not stop at a plan or merely give
+instructions.
+
+Read $REPO_DIR/.github/.jira_sync_config.yaml first and treat its settings as
+the source of truth for the Jira project, required labels, components, parent
+epic, label-to-issue-type mapping, summary format, description/comment options,
+and GitHub-to-Jira status mapping. The current look-back cursor is:
+$SINCE
+
+Use the GitHub CLI/API to find all non-pull-request issues in canonical/authd
+that have at least one configured sync label and were created or updated on or
+after that cursor. Include both open and closed issues and paginate instead of
+silently stopping at the first page.
+
+For every candidate, check Jira before creating anything. A corresponding
+ticket is a dedicated Jira issue whose description contains the exact GitHub
+issue URL and the sync marker "This issue was created from GitHub Issue".
+Inspect Atlassian document-format descriptions, including inlineCard attrs.url
+and link attrs.href; a release ticket or other issue that merely mentions the
+GitHub URL is not a corresponding ticket. Never create a duplicate.
+
+For each unmatched issue, create one Jira issue using the config values. Follow
+the sync bot's format: use the configured summary template, sync the issue
+body when enabled, use the configured label mapping or its default issue type,
+attach only configured/available components, set the configured epic parent,
+and apply the configured status for the GitHub state after creation. Do not add
+GitHub comments or a synced-to-jira label unless the config explicitly enables
+them. Read the Jira API token from ~/.jira_credentials, parse its YAML
+key/value format correctly, and never print or expose the credentials.
+
+Verify each created issue by reading it back from Jira. Report the GitHub
+issue number, Jira key, and final status. Only after all candidates have been
+checked and all creations have been verified, print this exact line:
+JIRA_SYNC_COMPLETE
+
+Do not modify repository source files or the look-back state file; the wrapper
+script manages the cursor after this session exits successfully.
+EOF
+
+echo "Starting Copilot Jira sync for issues created or updated since $SINCE"
+echo "Repository: $REPO_DIR"
+echo "State file: $STATE_FILE"
+
+if copilot --name "$SESSION_NAME" -C "$REPO_DIR" -i "$PROMPT"; then
+    temporary_state="$(mktemp "${STATE_FILE}.tmp.XXXXXX")"
+    printf '%s\n' "$RUN_STARTED_AT" >"$temporary_state"
+    mv -- "$temporary_state" "$STATE_FILE"
+    echo "Look-back cursor saved: $RUN_STARTED_AT"
+else
+    status=$?
+    echo "Copilot session failed; look-back cursor was not advanced." >&2
+    exit "$status"
+fi
