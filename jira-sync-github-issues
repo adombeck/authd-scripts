@@ -82,44 +82,12 @@ RUN_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 SESSION_NAME="GitHub-to-Jira sync $RUN_STARTED_AT"
 
 read -r -d '' PROMPT <<EOF || true
-Create the missing Jira issues for the recent GitHub issues in canonical/authd.
-Work directly and complete the API work; do not stop at a plan or merely give
-instructions.
+the github to jira sync (https://github.com/canonical/gh-jira-sync-bot) is broken currently.
+create jira issues for the recent github issues which have the jira label and don't have a corresponding jira ticket.
+take ./.github/.jira_sync_config.yaml into account.
+you can use the API token at ~/.jira_credentials.
 
-Read $REPO_DIR/.github/.jira_sync_config.yaml first and treat its settings as
-the source of truth for the Jira project, required labels, components, parent
-epic, label-to-issue-type mapping, summary format, description/comment options,
-and GitHub-to-Jira status mapping. The current look-back cursor is:
-$SINCE
-
-Use the GitHub CLI/API to find all non-pull-request issues in canonical/authd
-that have at least one configured sync label and were created or updated on or
-after that cursor. Include both open and closed issues and paginate instead of
-silently stopping at the first page.
-
-For every candidate, check Jira before creating anything. A corresponding
-ticket is a dedicated Jira issue whose description contains the exact GitHub
-issue URL and the sync marker "This issue was created from GitHub Issue".
-Inspect Atlassian document-format descriptions, including inlineCard attrs.url
-and link attrs.href; a release ticket or other issue that merely mentions the
-GitHub URL is not a corresponding ticket. Never create a duplicate.
-
-For each unmatched issue, create one Jira issue using the config values. Follow
-the sync bot's format: use the configured summary template, sync the issue
-body when enabled, use the configured label mapping or its default issue type,
-attach only configured/available components, set the configured epic parent,
-and apply the configured status for the GitHub state after creation. Do not add
-GitHub comments or a synced-to-jira label unless the config explicitly enables
-them. Read the Jira API token from ~/.jira_credentials, parse its YAML
-key/value format correctly, and never print or expose the credentials.
-
-Verify each created issue by reading it back from Jira. Report the GitHub
-issue number, Jira key, and final status. Only after all candidates have been
-checked and all creations have been verified, print this exact line:
-JIRA_SYNC_COMPLETE
-
-Do not modify repository source files or the look-back state file; the wrapper
-script manages the cursor after this session exits successfully.
+only consider github issues created after $SINCE
 EOF
 
 echo "Starting Copilot Jira sync for issues created or updated since $SINCE"
