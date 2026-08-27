@@ -1,0 +1,390 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+AUTHD_REPO="$HOME/projects/authd"
+JIRA_SERVER="https://warthogs.atlassian.net"
+CREDENTIALS_FILE="$HOME/.jira_credentials"
+SYNC_CONFIG_PATH="$AUTHD_REPO/.github/.jira_sync_config.yaml"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+CLAIM_SCRIPT="$SCRIPT_DIR/jira-claim-issue"
+
+usage() {
+    cat <<EOF
+Usage: $0 <github-issue-url>
+
+Finds the Jira issue with the same title as the GitHub issue, creating one
+when necessary. New issues use the settings in the current repository's
+resolved $SYNC_CONFIG_PATH and the team_id in $CREDENTIALS_FILE, then are
+passed to jira-claim-issue.
+
+The configured labels are treated as the GitHub label filter.
+EOF
+}
+
+die() {
+    echo "Error: $1" >&2
+    exit 1
+}
+
+credential() {
+    local wanted_key="$1"
+
+    python3 - "$CREDENTIALS_FILE" "$wanted_key" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+wanted_key = sys.argv[2]
+
+for line in path.read_text().splitlines():
+    key, separator, value = line.partition(":")
+    if not separator or key.strip() != wanted_key:
+        continue
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        value = value[1:-1]
+    print(value)
+    break
+PY
+}
+
+jira_post() {
+    local path="$1"
+    local body="$2"
+
+    curl --silent --fail --show-error \
+        --user "$EMAIL:$API_TOKEN" \
+        --header "Content-Type: application/json" \
+        --header "Accept: application/json" \
+        --request POST \
+        --data "$body" \
+        "$JIRA_SERVER$path"
+}
+
+if [[ $# -ne 1 ]]; then
+    usage
+    exit 1
+fi
+
+if [[ ${1,,} == "-h" || ${1,,} == "--help" ]]; then
+    usage
+    exit 0
+fi
+
+GITHUB_ISSUE_URL="$1"
+if [[ "$GITHUB_ISSUE_URL" =~ ^https://github\.com/([^/]+)/([^/]+)/issues/([0-9]+)/?$ ]]; then
+    GH_REPO="${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+    GH_ISSUE_NUMBER="${BASH_REMATCH[3]}"
+else
+    die "Unrecognised input: expected a GitHub issue URL"
+fi
+
+[[ -f "$CREDENTIALS_FILE" ]] || die "Credentials file not found: $CREDENTIALS_FILE"
+[[ -x "$CLAIM_SCRIPT" ]] || die "Claim script not found or not executable: $CLAIM_SCRIPT"
+[[ -f "$SYNC_CONFIG_PATH" ]] || die "Sync config not found: $SYNC_CONFIG_PATH"
+
+for command in curl gh python3 realpath yq; do
+    command -v "$command" >/dev/null 2>&1 || die "$command was not found in PATH"
+done
+
+CONFIG_FILE="$(realpath -- "$SYNC_CONFIG_PATH")" \
+    || die "Could not resolve sync config: $SYNC_CONFIG_PATH"
+
+if ! CONFIG_SETTINGS_JSON="$(yq -c '.settings // {}' "$CONFIG_FILE")"; then
+    die "Could not parse sync config: $CONFIG_FILE"
+fi
+if ! SETTINGS_JSON="$(
+    python3 - "$CONFIG_SETTINGS_JSON" <<'PY'
+import json
+import sys
+
+settings = json.loads(sys.argv[1])
+if not isinstance(settings, dict):
+    raise SystemExit("settings must be a mapping")
+
+project = settings.get("jira_project_key")
+if not isinstance(project, str) or not project:
+    raise SystemExit("settings.jira_project_key is required")
+
+def string_list(name):
+    values = settings.get(name) or []
+    if not isinstance(values, list) or any(not isinstance(value, str) for value in values):
+        raise SystemExit(f"settings.{name} must be a list of strings")
+    return values
+
+components = string_list("components")
+labels = string_list("labels")
+
+epic_key = settings.get("epic_key") or ""
+if not isinstance(epic_key, str):
+    raise SystemExit("settings.epic_key must be a string")
+
+status_mapping = settings.get("status_mapping") or {}
+if not isinstance(status_mapping, dict) or any(
+    not isinstance(key, str) or not isinstance(value, str)
+    for key, value in status_mapping.items()
+):
+    raise SystemExit("settings.status_mapping must be a mapping of strings")
+
+sync_description = settings.get("sync_description", True)
+if not isinstance(sync_description, bool):
+    raise SystemExit("settings.sync_description must be a boolean")
+
+print(json.dumps({
+    "jira_project_key": project,
+    "components": components,
+    "labels": labels,
+    "status_mapping": status_mapping,
+    "epic_key": epic_key,
+    "sync_description": sync_description,
+}, separators=(",", ":")))
+PY
+)"; then
+    die "Invalid settings in $CONFIG_FILE"
+fi
+
+JIRA_PROJECT="$(
+    python3 - "$SETTINGS_JSON" <<'PY'
+import json
+import sys
+
+print(json.loads(sys.argv[1])["jira_project_key"])
+PY
+)"
+CONFIGURED_LABELS_JSON="$(
+    python3 - "$SETTINGS_JSON" <<'PY'
+import json
+import sys
+
+print(json.dumps(json.loads(sys.argv[1])["labels"], separators=(",", ":")))
+PY
+)"
+
+API_TOKEN="$(credential token)"
+EMAIL="$(credential user)"
+[[ -n "$API_TOKEN" && -n "$EMAIL" ]] || die "Missing user or token in $CREDENTIALS_FILE"
+
+echo "Using sync config: $CONFIG_FILE"
+echo "Fetching GitHub issue: $GITHUB_ISSUE_URL"
+if ! ISSUE_JSON="$(
+    gh issue view "$GH_ISSUE_NUMBER" \
+        --repo "$GH_REPO" \
+        --json title,body,author,state,stateReason,url,labels
+)"; then
+    die "Failed to fetch GitHub issue"
+fi
+
+if ! ISSUE_TITLE="$(
+    printf '%s' "$ISSUE_JSON" |
+        python3 -c '
+import json
+import sys
+
+title = json.load(sys.stdin).get("title", "")
+if not isinstance(title, str) or not title:
+    raise SystemExit(1)
+print(title)
+'
+)"; then
+    die "Could not read GitHub issue title"
+fi
+
+if ! LABEL_MATCH="$(
+    python3 - "$ISSUE_JSON" "$CONFIGURED_LABELS_JSON" <<'PY'
+import json
+import sys
+
+issue = json.loads(sys.argv[1])
+configured_labels = {
+    label.casefold() for label in json.loads(sys.argv[2])
+}
+issue_labels = {
+    label["name"].casefold()
+    for label in issue.get("labels", [])
+    if isinstance(label, dict) and isinstance(label.get("name"), str)
+}
+print("true" if not configured_labels or configured_labels & issue_labels else "false")
+PY
+)"; then
+    die "Could not inspect GitHub issue labels"
+fi
+[[ "$LABEL_MATCH" == "true" ]] \
+    || die "GitHub issue does not have any configured synchronization label"
+
+echo "Issue title: $ISSUE_TITLE"
+
+JQL=$(python3 - "$JIRA_PROJECT" <<'PY'
+import sys
+
+project = sys.argv[1]
+
+def escape_jql_string(value):
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+print(f'project = "{escape_jql_string(project)}" ORDER BY key')
+PY
+)
+
+jira_search() {
+    local next_page_token="$1"
+    local -a args=(
+        --silent
+        --fail
+        --show-error
+        --user "$EMAIL:$API_TOKEN"
+        --header "Accept: application/json"
+        --get
+        --data-urlencode "jql=$JQL"
+        --data-urlencode "fields=summary"
+        --data-urlencode "maxResults=100"
+    )
+
+    if [[ -n "$next_page_token" ]]; then
+        args+=(--data-urlencode "nextPageToken=$next_page_token")
+    fi
+
+    curl "${args[@]}" "$JIRA_SERVER/rest/api/3/search/jql"
+}
+
+# Jira's summary text search is token-based and can miss punctuation or
+# stop-word-only titles, so compare every summary returned for the project.
+echo "Searching Jira for an exact title match..."
+JIRA_ISSUE_KEY=""
+NEXT_PAGE_TOKEN=""
+while true; do
+    if ! SEARCH_RESULT="$(jira_search "$NEXT_PAGE_TOKEN")"; then
+        die "Failed to query Jira"
+    fi
+
+    if ! SEARCH_STATE="$(
+        printf '%s' "$SEARCH_RESULT" |
+            python3 -c '
+import json
+import sys
+
+data = json.load(sys.stdin)
+issues = data.get("issues")
+if not isinstance(issues, list):
+    raise SystemExit("Jira response did not contain an issues list")
+
+target = sys.argv[1].casefold()
+match = ""
+
+for issue in issues:
+    if not isinstance(issue, dict):
+        raise SystemExit("Jira response contained an invalid issue")
+    fields = issue.get("fields")
+    if not isinstance(fields, dict) or not isinstance(fields.get("summary"), str):
+        raise SystemExit("Jira response contained an issue without a summary")
+    if fields["summary"].casefold() == target:
+        match = issue.get("key", "")
+        if not isinstance(match, str) or not match:
+            raise SystemExit("Jira response contained an issue without a key")
+        break
+
+next_page_token = data.get("nextPageToken") or ""
+if not isinstance(next_page_token, str):
+    raise SystemExit("Jira response contained an invalid next page token")
+print(f"{match}\t{next_page_token}")
+' "$ISSUE_TITLE"
+    )"; then
+        die "Jira returned invalid search data"
+    fi
+
+    JIRA_ISSUE_KEY="${SEARCH_STATE%%$'\t'*}"
+    NEXT_PAGE_TOKEN="${SEARCH_STATE#*$'\t'}"
+
+    [[ -n "$JIRA_ISSUE_KEY" ]] && break
+    [[ -n "$NEXT_PAGE_TOKEN" ]] || break
+done
+
+if [[ -n "$JIRA_ISSUE_KEY" ]]; then
+    echo "Found Jira issue: $JIRA_ISSUE_KEY"
+else
+    TEAM_ID="$(credential team_id)"
+    [[ -n "$TEAM_ID" ]] || die "Missing team_id in $CREDENTIALS_FILE"
+
+    CREATE_PAYLOAD=$(python3 - "$ISSUE_JSON" "$GITHUB_ISSUE_URL" "$SETTINGS_JSON" "$TEAM_ID" <<'PY'
+import json
+import sys
+
+issue, github_url, settings, team_id = (
+    json.loads(sys.argv[1]),
+    sys.argv[2],
+    json.loads(sys.argv[3]),
+    sys.argv[4],
+)
+
+author = (issue.get("author") or {}).get("login")
+if not isinstance(author, str) or not author:
+    raise SystemExit("GitHub issue author is unavailable")
+
+body = issue.get("body") or ""
+if not settings["sync_description"]:
+    body = ""
+elif len(body) > 28000:
+    body = (
+        body[:28000]
+        + "..."
+        + "\n Text exceeded Jira maximum length. Please see the original issue for details."
+    )
+
+description = (
+    f"This issue was created from GitHub Issue {github_url}\n"
+    f"Issue was submitted by: {author}\n\n"
+    "PLEASE KEEP ALL THE CONVERSATION ON GITHUB\n\n"
+    f"{body}"
+)
+
+fields = {
+    "project": {"key": settings["jira_project_key"]},
+    "summary": issue["title"],
+    "description": {
+        "type": "doc",
+        "version": 1,
+        "content": [{
+            "type": "paragraph",
+            "content": [{"type": "text", "text": description}],
+        }],
+    },
+    "issuetype": {"name": "Bug"},
+    "customfield_10001": team_id,
+}
+
+if settings["components"]:
+    fields["components"] = [
+        {"name": component} for component in settings["components"]
+    ]
+if settings["epic_key"]:
+    fields["parent"] = {"key": settings["epic_key"]}
+
+print(json.dumps({"fields": fields}, separators=(",", ":")))
+PY
+)
+
+    echo "Creating Jira issue..."
+    if ! CREATE_RESPONSE="$(jira_post "/rest/api/3/issue" "$CREATE_PAYLOAD")"; then
+        die "Failed to create Jira issue"
+    fi
+    if ! JIRA_ISSUE_KEY="$(
+        printf '%s' "$CREATE_RESPONSE" |
+            python3 -c '
+import json
+import sys
+
+print(json.load(sys.stdin).get("key", ""))
+'
+    )"; then
+        die "Jira returned invalid issue data"
+    fi
+    [[ -n "$JIRA_ISSUE_KEY" ]] || die "Jira did not return the created issue key"
+    echo "Created Jira issue: $JIRA_ISSUE_KEY"
+fi
+
+[[ "$JIRA_ISSUE_KEY" =~ ^[A-Z][A-Z0-9_]*-[0-9]+$ ]] \
+    || die "Jira returned an invalid issue key"
+
+JIRA_ISSUE_URL="$JIRA_SERVER/browse/$JIRA_ISSUE_KEY"
+echo "Claiming Jira issue: $JIRA_ISSUE_URL"
+"$CLAIM_SCRIPT" "$JIRA_ISSUE_URL"
