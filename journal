@@ -28,6 +28,8 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+export SYSTEMD_COLORS=1
+
 journalctl \
     _SYSTEMD_UNIT=authd.service \+ \
     UNIT=authd.service \+ \
