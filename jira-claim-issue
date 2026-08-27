@@ -1,9 +1,5 @@
 #!/bin/bash
 
-# Finds the Jira ticket matching a GitHub issue (by title, reported by "STS API"),
-# assigns it to the current user, adds it to the active sprint, and marks it as
-# In Progress.
-
 set -euo pipefail
 
 JIRA_SERVER="https://warthogs.atlassian.net"
@@ -32,6 +28,11 @@ die() { echo "Error: $1" >&2; exit 1; }
 if [[ $# -ne 1 ]]; then
     usage
     exit 1
+fi
+
+if [[ ${1,,} == "-h" || ${1,,} == "--help" ]]; then
+    usage
+    exit 0
 fi
 
 INPUT="$1"
