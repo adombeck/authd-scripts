@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+usage() {
+    cat <<'EOF'
+Usage: fix-submodules
+
+Repair broken submodule metadata in the current Git worktree and initialize
+all configured submodules recursively.
+EOF
+}
+
+if [[ $# -gt 0 ]]; then
+    case "$1" in
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            usage >&2
+            exit 1
+            ;;
+    esac
+fi
+
+if ! repo_root=$(git rev-parse --show-toplevel 2>/dev/null); then
+    printf 'error: run %s from an authd Git worktree\n' "${0##*/}" >&2
+    exit 1
+fi
+
+cd "$repo_root"
+
+if [[ ! -f .gitmodules ]]; then
+    printf 'error: no .gitmodules file found in %s\n' "$repo_root" >&2
+    exit 1
+fi
+
+submodule_paths=$(git config --file .gitmodules --get-regexp \
+    '^submodule\..*\.path$' | awk '{print $2}')
+
+while IFS= read -r path; do
+    [[ -n "$path" ]] || continue
+
+    submodule="$repo_root/$path"
+    if git -C "$submodule" rev-parse --git-dir >/dev/null 2>&1; then
+        continue
+    fi
+
+    git_pointer="$submodule/.git"
+    if [[ -e "$git_pointer" && ! -f "$git_pointer" ]]; then
+        printf 'error: refusing to remove non-file Git metadata at %s\n' \
+            "$git_pointer" >&2
+        exit 1
+    fi
+
+    if [[ -d "$submodule" ]]; then
+        leftover=$(find "$submodule" -mindepth 1 -maxdepth 1 \
+            ! -name .git -print -quit)
+        if [[ -n "$leftover" ]]; then
+            printf 'error: refusing to repair %s because it contains %s\n' \
+                "$path" "$leftover" >&2
+            exit 1
+        fi
+    fi
+
+    printf 'Repairing submodule metadata: %s\n' "$path"
+    rm -f -- "$git_pointer"
+    rm -rf -- "$(git rev-parse --git-path "modules/$path")"
+done <<< "$submodule_paths"
+
+git submodule update --init --recursive
