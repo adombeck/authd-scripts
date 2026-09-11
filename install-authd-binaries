@@ -1,0 +1,70 @@
+#!/bin/bash
+
+set -euo pipefail
+
+usage(){
+    cat << EOF
+usage: $0 [--skip-pam]
+
+Install the authd binaries from the project directory. This is useful for testing
+binaries built manually or by the build-authd-binaries script without having to
+build and install the deb package.
+
+The script currently doesn't copy the NSS module.
+
+Options:
+  --skip-pam
+      Skip installation of the PAM module. Installing the PAM module built by
+      the build-authd-binaries script is known to cause the system to crash
+      after installation, so you should reboot immediately after installing the
+      PAM module. It can also cause other issues, so if you encounter any issues
+      with the PAM module, build and install the deb package instead.
+EOF
+}
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --skip-pam)
+            SKIP_PAM=1
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1"
+            usage
+            exit 1
+            ;;
+    esac
+done
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+BUILD_DIR=${BUILD_DIR:-"${SCRIPT_DIR}/../build/authd-binaries"}
+
+set -x
+
+systemctl stop authd || true
+
+cp "${BUILD_DIR}/authd" /usr/libexec/authd
+cp "${BUILD_DIR}/pam/pam" /usr/libexec/authd-pam
+
+if [ -z "${SKIP_PAM:-}" ]; then
+    cp "${BUILD_DIR}/pam/pam_authd.so" /usr/lib/x86_64-linux-gnu/security/pam_authd.so
+    cp "${BUILD_DIR}/pam/go-exec/pam_authd_exec.so" /usr/lib/x86_64-linux-gnu/security/pam_authd_exec.so
+fi
+
+sed s,@AUTHD_DAEMONS_PATH@,/usr/libexec,g "${BUILD_DIR}/debian/authd.service.in" > /tmp/authd.service
+if ! diff /tmp/authd.service /usr/lib/systemd/system/authd.service >/dev/null; then
+    mv /tmp/authd.service /usr/lib/systemd/system/authd.service
+    systemctl daemon-reload
+fi
+
+if [ -f "${BUILD_DIR}/authctl" ]; then
+    cp "${BUILD_DIR}/authctl" /usr/local/bin/
+fi
+
+systemctl start authd
+#"${SCRIPT_DIR}/journal" -f -e -n 20
