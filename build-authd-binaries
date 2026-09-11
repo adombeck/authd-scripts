@@ -36,6 +36,8 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+BUILD_DIR=${BUILD_DIR:-"../build/authd-binaries"}
+
 set -x
 
 if [ -n "${VERSION:=}" ]; then
@@ -47,14 +49,20 @@ go mod vendor
 go generate -C internal/proto/authd
 go generate -C pam/internal/gdm
 
-go build -v -o authd ./cmd/authd
+go build -v -o "${BUILD_DIR}/authd" ./cmd/authd
 
 go generate -C pam -x -tags pam_debug
 
-go build -C pam -v .
+mkdir -p "${BUILD_DIR}/pam/go-exec"
+go build -C pam -v -o "$(realpath "${BUILD_DIR}/pam/pam")" .
+cp pam/pam_authd.so "${BUILD_DIR}/pam/"
+cp pam/go-exec/pam_authd_exec.so "${BUILD_DIR}/pam/go-exec/"
+
+mkdir -p "${BUILD_DIR}/debian"
+cp debian/authd.service.in "${BUILD_DIR}/debian/"
 
 if [ -d ./cmd/authctl ]; then
-    go build -v -o authctl ./cmd/authctl
+    go build -v -o  "${BUILD_DIR}/authctl" ./cmd/authctl
 fi
 
 # Some protobuf files get updated but the change depends on the locally installed
