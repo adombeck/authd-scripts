@@ -1,0 +1,226 @@
+#!/usr/bin/env python3
+"""
+debug-ci-job - create a worktree and launch Copilot CLI for a failed authd CI job.
+
+Usage: debug-ci-job <github-actions-job-url>
+
+Supports:
+  https://github.com/canonical/authd/actions/runs/123/job/456
+  https://github.com/canonical/authd/actions/runs/123/job/456?pr=789
+"""
+
+import json
+import re
+import shlex
+import subprocess
+import sys
+from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
+
+AUTHD_REPO = Path("~/projects/authd").expanduser()
+
+GUAKE_DBUS_DEST = "org.guake3.RemoteControl"
+GUAKE_DBUS_OBJECT = "/org/guake3/RemoteControl"
+GUAKE_DBUS_IFACE = "org.guake3.RemoteControl"
+
+JOB_PATH_RE = re.compile(
+    r"^/canonical/authd/actions/runs/(?P<run_id>\d+)/job/(?P<job_id>\d+)$"
+)
+
+
+def die(msg):
+    print(f"Error: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def parse_job_url(url):
+    try:
+        parsed = urlsplit(url)
+    except ValueError as error:
+        die(f"Invalid CI job URL: {error}")
+
+    if parsed.scheme != "https" or parsed.netloc != "github.com" or parsed.fragment:
+        die(f"Unrecognised CI job URL: {url}")
+
+    match = JOB_PATH_RE.fullmatch(parsed.path)
+    if not match:
+        die(f"Unrecognised CI job URL: {url}")
+
+    query = parse_qs(parsed.query, keep_blank_values=True)
+    pr_values = query.get("pr", [])
+    if len(pr_values) > 1 or (pr_values and not pr_values[0].isdigit()):
+        die(f"Invalid PR number in CI job URL: {url}")
+
+    return (
+        match.group("run_id"),
+        match.group("job_id"),
+        pr_values[0] if pr_values else None,
+    )
+
+
+def gh_api_json(path):
+    result = subprocess.run(
+        ["gh", "api", path],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        die(f"gh api {path} failed: {result.stderr.strip()}")
+
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        die(f"gh api {path} returned invalid JSON: {error}")
+
+
+def try_gh_api_json(path):
+    result = subprocess.run(
+        ["gh", "api", path],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        print(f"Could not query gh api {path}: {result.stderr.strip()}",
+              file=sys.stderr)
+        return None
+
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        print(f"Could not parse gh api {path} response: {error}",
+              file=sys.stderr)
+        return None
+
+
+def get_pr_number(owner, repo, run_id, explicit_pr_number):
+    if explicit_pr_number:
+        return explicit_pr_number
+
+    print(f"Fetching PR associated with workflow run {run_id}...")
+    run = gh_api_json(f"repos/{owner}/{repo}/actions/runs/{run_id}")
+
+    for pull_request in run.get("pull_requests") or []:
+        number = pull_request.get("number")
+        if number is not None:
+            return str(number)
+
+    # Some workflow-run responses do not include pull_requests even when the
+    # run was triggered by a pull request. Resolve the head commit as a
+    # fallback before trying the branch name.
+    head_sha = run.get("head_sha")
+    if head_sha:
+        pull_requests = try_gh_api_json(
+            f"repos/{owner}/{repo}/commits/{head_sha}/pulls"
+        )
+        if isinstance(pull_requests, list):
+            for pull_request in pull_requests:
+                number = pull_request.get("number")
+                if number is not None:
+                    return str(number)
+
+    head_branch = run.get("head_branch")
+    if head_branch:
+        result = subprocess.run(
+            ["gh", "pr", "list",
+             "--repo", f"{owner}/{repo}",
+             "--state", "all",
+             "--head", head_branch,
+             "--limit", "1",
+             "--json", "number",
+             "--jq", ".[0].number // \"\""],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0 and result.stdout.strip().isdigit():
+            return result.stdout.strip()
+        if result.returncode != 0:
+            print(f"Could not query PRs for branch {head_branch}: "
+                  f"{result.stderr.strip()}", file=sys.stderr)
+
+    die(
+        f"Could not determine the PR for workflow run {run_id}. "
+        "Add ?pr=<number> to the job URL."
+    )
+
+
+def get_pr_branch(owner, repo, number):
+    pull_request = gh_api_json(f"repos/{owner}/{repo}/pulls/{number}")
+    head = pull_request.get("head")
+    branch_name = head.get("ref") if isinstance(head, dict) else None
+    if not branch_name:
+        die(f"PR #{number} does not have a head branch")
+    return branch_name
+
+
+def guake_call(method, *args):
+    subprocess.run(
+        ["gdbus", "call", "--session",
+         "--dest", GUAKE_DBUS_DEST,
+         "--object-path", GUAKE_DBUS_OBJECT,
+         "--method", f"{GUAKE_DBUS_IFACE}.{method}"] + list(args),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def main():
+    if len(sys.argv) != 2 or sys.argv[1] in ("-h", "--help"):
+        print(__doc__.strip(), file=sys.stderr)
+        sys.exit(0 if len(sys.argv) == 2 and sys.argv[1] in ("-h", "--help") else 1)
+
+    url = sys.argv[1]
+    run_id, job_id, explicit_pr_number = parse_job_url(url)
+
+    if not AUTHD_REPO.is_dir():
+        die(f"authd repository not found: {AUTHD_REPO}")
+
+    owner, repo = "canonical", "authd"
+    pr_number = get_pr_number(owner, repo, run_id, explicit_pr_number)
+    print(f"PR: {owner}/{repo}#{pr_number}")
+
+    print(f"Fetching branch for PR #{pr_number}...")
+    branch_name = get_pr_branch(owner, repo, pr_number)
+    print(f"Branch: {branch_name}")
+
+    worktree_dirname = branch_name.replace("/", "-")
+    worktree_path = AUTHD_REPO.parent / f"authd-{worktree_dirname}"
+
+    print(f"Ensuring worktree at {worktree_path}...")
+    result = subprocess.run(["authd-worktree", branch_name], cwd=AUTHD_REPO)
+    if result.returncode != 0:
+        die("Failed to create/open worktree")
+    if not worktree_path.is_dir():
+        die(f"Worktree was not created: {worktree_path}")
+
+    print(f"Opening Guake tab for {worktree_path}...")
+
+    prompt = (
+        f"Debug the failed GitHub Actions job at {url} for "
+        f"{owner}/{repo} PR #{pr_number} on branch {branch_name}. "
+        f"Inspect the failed job logs with `gh run view {run_id} --job "
+        f"{job_id} --log-failed --repo {owner}/{repo}`, identify the root "
+        "cause, implement the fix, and run relevant tests."
+    )
+    q = shlex.quote(prompt)
+    w = shlex.quote(str(worktree_path))
+    # Prefix the command with a space so it isn't recorded in shell history.
+    launch = (
+        " cd {worktree}; clear; "
+        "_p={prompt}; "
+        "if [ -n \"$ZSH_VERSION\" ]; then "
+        "vared -p $'Edit prompt, then press Enter:\\n' _p; "
+        "else "
+        "read -e -i \"$_p\" -p $'Edit prompt, then press Enter:\\n' _p; "
+        "fi && "
+        "copilot --autopilot --allow-all -i \"$_p\""
+    ).format(worktree=w, prompt=q)
+    guake_call("execute_command", launch + "\n")
+
+    guake_call("show")
+
+    print(f"Done! Prompt staged in new Guake tab for {url}. "
+          "Edit it if needed, then press Enter to run Copilot.")
+
+
+if __name__ == "__main__":
+    main()
