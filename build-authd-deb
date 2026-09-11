@@ -118,6 +118,7 @@ fi
 
 CHROOT_TARBALL="$HOME/.cache/sbuild/${DIST}-amd64.tar.zst"
 if ! [ -f "$CHROOT_TARBALL" ]; then
+    mkdir -p "$(dirname "$CHROOT_TARBALL")"
     # Create the sbuild chroot tarball if it doesn't exist
     # shellcheck disable=SC2016 # We don't want the expression in --customize-hook to be expanded
     mmdebstrap --variant=buildd --arch=amd64 \
