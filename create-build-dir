@@ -88,7 +88,10 @@ git diff >> /tmp/uncommitted.patch
 if [ -n "${IN_PLACE}" ] && [ -d "${BUILD_DIR}/.git" ]; then
     # Refresh the existing build directory in place to keep its inode stable.
     cd "${BUILD_DIR}"
-    git fetch --quiet "${GIT_ROOT_DIR}" HEAD${ENSURE_MAIN:+ main}
+    # Submodules are seeded from the source checkout below. Do not let global
+    # recursive-fetch settings try to fetch local-only submodule commits first.
+    git fetch --quiet --no-recurse-submodules \
+        "${GIT_ROOT_DIR}" HEAD${ENSURE_MAIN:+ main}
     # Seed each existing submodule's object store from the matching submodule in
     # the source repo before the outer checkout below tries to update it. The
     # source checkout always has every commit we have checked out locally, even
