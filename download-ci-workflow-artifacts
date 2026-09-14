@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 #
 # Downloads selected artifacts from GitHub Actions workflow runs
-# and extracts only requested files.
+# and extracts only requested files. Previously extracted files are reused when
+# the requested files are still available locally. If a requested extraction is
+# missing, the artifact is downloaded again. HTML extractions also include
+# local files referenced by the HTML, such as screenshots and recordings.
 #
 # Requirements:
 #   - gh CLI authenticated (gh auth login)
@@ -14,6 +17,10 @@ usage() {
 Usage: $0 [options]
 
 Downloads workflow artifacts and extracts only selected files.
+
+The cache is checked against the requested extraction patterns. If the
+requested files are missing, the artifact is downloaded again. When an HTML
+file is requested, local files referenced by it are extracted as well.
 
 Required options:
   --repo <owner/repo>
@@ -242,6 +249,135 @@ run_metadata() {
     printf '%s\t%s\t%s' "$event" "$pr_number" "$event_id"
 }
 
+pattern_matches_html() {
+    local pattern="$1"
+    [[ "$pattern" == *".html"* || "$pattern" == *".htm"* ]]
+}
+
+local_pattern_matches() {
+    local directory="$1"
+    local pattern="$2"
+    local file relative
+
+    while IFS= read -r -d '' file; do
+        relative="${file#"$directory"/}"
+        # shellcheck disable=SC2053
+        if [[ "$relative" == $pattern ]]; then
+            return 0
+        fi
+    done < <(find "$directory" -type f ! -name meta.json -print0)
+
+    return 1
+}
+
+html_reference_paths() {
+    local directory="$1"
+    local html_file="$2"
+    local html_relative html_directory attribute reference candidate resolved
+
+    html_relative="${html_file#"$directory"/}"
+    html_directory="${html_relative%/*}"
+    if [[ "$html_directory" == "$html_relative" ]]; then
+        html_directory=""
+    fi
+
+    while IFS= read -r attribute; do
+        reference="${attribute#*=}"
+        reference="${reference#\"}"
+        reference="${reference%\"}"
+        reference="${reference%%\?*}"
+        reference="${reference%%#*}"
+
+        if [[ -z "$reference" || "$reference" == /* ||
+            "$reference" == data:* || "$reference" == javascript:* ||
+            "$reference" == *"://"* ]]; then
+            continue
+        fi
+
+        if [[ -n "$html_directory" ]]; then
+            candidate="$html_directory/$reference"
+        else
+            candidate="$reference"
+        fi
+        resolved="$(realpath -m -- "$directory/$candidate")" || continue
+        case "$resolved" in
+            "$directory"/*)
+                printf '%s\n' "${resolved#"$directory"/}"
+                ;;
+        esac
+    done < <(
+        {
+            grep -oE '(src|href)="[^"]+"' "$html_file" || true
+            grep -oE '(src|href)=\\"[^\\"]+\\"' "$html_file" |
+                sed 's/\\"/"/g' || true
+        }
+    )
+}
+
+html_dependencies_present() {
+    local directory="$1"
+    local pattern="$2"
+    local file relative dependency found=0
+
+    while IFS= read -r -d '' file; do
+        relative="${file#"$directory"/}"
+        # shellcheck disable=SC2053
+        if [[ "$relative" != $pattern ]]; then
+            continue
+        fi
+        found=1
+        while IFS= read -r dependency; do
+            if [[ ! -f "$directory/$dependency" ]]; then
+                return 1
+            fi
+        done < <(html_reference_paths "$directory" "$file")
+    done < <(find "$directory" -type f \( -iname '*.html' -o -iname '*.htm' \) -print0)
+
+    [[ "$found" -eq 1 ]]
+}
+
+cache_satisfies_request() {
+    local directory="$1"
+    local metadata="$2"
+    local pattern extracted_file
+
+    [[ -f "$metadata" ]] || return 1
+
+    for pattern in "${EXTRACT_PATTERNS[@]}"; do
+        if [[ "$pattern" == "*" ]]; then
+            if ! jq -e --arg pattern "$pattern" \
+                '(.extract_patterns // []) | index($pattern) != null' \
+                "$metadata" >/dev/null; then
+                return 1
+            fi
+            if ! jq -e '.extracted_files // [] | length > 0' "$metadata" >/dev/null; then
+                return 1
+            fi
+            while IFS= read -r extracted_file; do
+                [[ -f "$directory/$extracted_file" ]] || return 1
+            done < <(jq -r '.extracted_files[]?' "$metadata")
+            continue
+        fi
+
+        if jq -e --arg pattern "$pattern" \
+            '(.extract_patterns // []) | index($pattern) != null' \
+            "$metadata" >/dev/null; then
+            if ! jq -e '.extracted_files // [] | length > 0' "$metadata" >/dev/null; then
+                return 1
+            fi
+            while IFS= read -r extracted_file; do
+                [[ -f "$directory/$extracted_file" ]] || return 1
+            done < <(jq -r '.extracted_files[]?' "$metadata")
+        elif pattern_matches_html "$pattern"; then
+            html_dependencies_present "$directory" "$pattern" || return 1
+        else
+            local_pattern_matches "$directory" "$pattern" || return 1
+        fi
+    done
+
+    return 0
+}
+
 mkdir -p "$OUTPUT_DIR"
 
 DOWNLOADED=0
@@ -294,35 +430,113 @@ for i in "${!RUN_IDS[@]}"; do
         ARTIFACT_NAME=$(echo "$artifact_line" | jq -r '.name')
 
         DEST_DIR="${RUN_DIR}/${ARTIFACT_NAME}"
-        if [[ -f "${DEST_DIR}/meta.json" ]]; then
-            echo "  Artifact '$ARTIFACT_NAME' already present in $DEST_DIR, skipping."
+        META_FILE="${DEST_DIR}/meta.json"
+        if cache_satisfies_request "$DEST_DIR" "$META_FILE"; then
+            echo "  Artifact '$ARTIFACT_NAME' already contains the requested files in $DEST_DIR, skipping."
             (( SKIPPED++ )) || true
             continue
+        fi
+        if [[ -f "$META_FILE" ]]; then
+            echo "  Artifact '$ARTIFACT_NAME' is missing requested files; downloading it again."
         fi
         mkdir -p "$DEST_DIR"
 
         ZIP_FILE="${DEST_DIR}/artifact.zip"
 
         echo "  Downloading artifact '$ARTIFACT_NAME' (id: $ARTIFACT_ID) ..."
-        gh api \
+        if ! gh api \
             -H "Accept: application/vnd.github+json" \
             "/repos/${REPO}/actions/artifacts/${ARTIFACT_ID}/zip" \
-            > "$ZIP_FILE" || { echo "  ERROR: download failed, skipping."; continue; }
+            > "$ZIP_FILE"; then
+            echo "  ERROR: download failed, skipping."
+            rm -f "$ZIP_FILE"
+            continue
+        fi
+
+        mapfile -t ZIP_ENTRIES < <(unzip -Z1 "$ZIP_FILE" | sed '/\/$/d')
+        declare -A ZIP_ENTRY_SET=()
+        declare -A SELECTED_ENTRY_SET=()
+        SELECTED_ENTRIES=()
+        for entry in "${ZIP_ENTRIES[@]}"; do
+            ZIP_ENTRY_SET["$entry"]=1
+        done
+
+        select_entry() {
+            local entry="$1"
+            if [[ -z "${SELECTED_ENTRY_SET[$entry]+present}" ]]; then
+                SELECTED_ENTRY_SET["$entry"]=1
+                SELECTED_ENTRIES+=("$entry")
+            fi
+        }
+
+        for pattern in "${EXTRACT_PATTERNS[@]}"; do
+            pattern_found=0
+            for entry in "${ZIP_ENTRIES[@]}"; do
+                # shellcheck disable=SC2053
+                if [[ "$entry" == $pattern ]]; then
+                    select_entry "$entry"
+                    pattern_found=1
+                fi
+            done
+            if [[ "$pattern_found" -eq 0 ]]; then
+                echo "  No files matching '$pattern' in this artifact."
+            fi
+        done
+
+        HTML_REQUESTED=0
+        for pattern in "${EXTRACT_PATTERNS[@]}"; do
+            if pattern_matches_html "$pattern"; then
+                HTML_REQUESTED=1
+                break
+            fi
+        done
+
+        if [[ "$HTML_REQUESTED" -eq 1 ]]; then
+            for entry in "${ZIP_ENTRIES[@]}"; do
+                case "$entry" in
+                    *.html|*.htm)
+                        select_entry "$entry"
+                        ;;
+                esac
+            done
+        fi
 
         echo "  Extracting selected files to $DEST_DIR ..."
-        if unzip -q -o "$ZIP_FILE" "${EXTRACT_PATTERNS[@]}" -d "$DEST_DIR"; then
-            :
-        else
-            unzip_exit=$?
-            if [[ "$unzip_exit" -eq 11 ]]; then
-                echo "  No files matching extract patterns in this artifact."
-            else
-                echo "  ERROR: failed to extract artifact (unzip exit $unzip_exit)." >&2
-                rm "$ZIP_FILE"
+        if [[ ${#SELECTED_ENTRIES[@]} -gt 0 ]] &&
+            ! unzip -q -o "$ZIP_FILE" "${SELECTED_ENTRIES[@]}" -d "$DEST_DIR"; then
+            echo "  ERROR: failed to extract selected files." >&2
+            rm -f "$ZIP_FILE"
+            continue
+        fi
+
+        if [[ "$HTML_REQUESTED" -eq 1 ]]; then
+            while IFS= read -r -d '' html_file; do
+                while IFS= read -r dependency; do
+                    if [[ -n "${ZIP_ENTRY_SET[$dependency]+present}" ]]; then
+                        select_entry "$dependency"
+                    fi
+                done < <(html_reference_paths "$DEST_DIR" "$html_file")
+            done < <(find "$DEST_DIR" -type f \( -iname '*.html' -o -iname '*.htm' \) -print0)
+
+            if [[ ${#SELECTED_ENTRIES[@]} -gt 0 ]] &&
+                ! unzip -q -o "$ZIP_FILE" "${SELECTED_ENTRIES[@]}" -d "$DEST_DIR"; then
+                echo "  ERROR: failed to extract HTML dependencies." >&2
+                rm -f "$ZIP_FILE"
                 continue
             fi
         fi
-        rm "$ZIP_FILE"
+        rm -f "$ZIP_FILE"
+
+        EXISTING_PATTERNS_JSON='[]'
+        if [[ -f "$META_FILE" ]]; then
+            EXISTING_PATTERNS_JSON="$(jq -c '.extract_patterns // []' "$META_FILE" 2>/dev/null || printf '[]')"
+        fi
+        REQUESTED_PATTERNS_JSON="$(printf '%s\n' "${EXTRACT_PATTERNS[@]}" | jq -Rsc 'split("\n") | map(select(length > 0))')"
+        ALL_PATTERNS_JSON="$(jq -cn \
+            --argjson existing "$EXISTING_PATTERNS_JSON" \
+            --argjson requested "$REQUESTED_PATTERNS_JSON" \
+            '$existing + $requested | unique')"
+        EXTRACTED_FILES_JSON="$(find "$DEST_DIR" -type f ! -name meta.json -printf '%P\n' | sort | jq -Rsc 'split("\n") | map(select(length > 0))')"
 
         jq -n \
             --arg run_id "$RUN_ID" \
@@ -334,8 +548,10 @@ for i in "${!RUN_IDS[@]}"; do
             --arg conclusion "$RUN_CONCLUSION" \
             --arg artifact_name "$ARTIFACT_NAME" \
             --arg artifact_id "$ARTIFACT_ID" \
-            '{run_id: $run_id, pr_number: $pr_number, event: $event, event_id: $event_id, run_scope: $run_scope, run_date: $run_date, conclusion: $conclusion, artifact_name: $artifact_name, artifact_id: $artifact_id}' \
-            > "${DEST_DIR}/meta.json"
+            --argjson extract_patterns "$ALL_PATTERNS_JSON" \
+            --argjson extracted_files "$EXTRACTED_FILES_JSON" \
+            '{run_id: $run_id, pr_number: $pr_number, event: $event, event_id: $event_id, run_scope: $run_scope, run_date: $run_date, conclusion: $conclusion, artifact_name: $artifact_name, artifact_id: $artifact_id, extract_patterns: $extract_patterns, extracted_files: $extracted_files}' \
+            > "$META_FILE"
 
         (( DOWNLOADED++ )) || true
     done < <(echo "$ARTIFACTS_JSON" | jq -c '.')
