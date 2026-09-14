@@ -89,6 +89,19 @@ fi
 "${SCRIPT_DIR}/create-build-dir" --build-dir "${BUILD_DIR}"
 cd "${BUILD_DIR}"
 
+# debian/rules derives the gnome-shell compatibility constraint from the
+# changelog distribution. Retarget the disposable build checkout so the
+# package can be installed on the requested Ubuntu release.
+source_distribution="$(dpkg-parsechangelog -SDistribution)"
+if [[ "${source_distribution}" != "${DIST}" ]]; then
+    sed -i -E "1s/^(([^ ]+) \\([^)]*\\) )[^;]+;/\\1${DIST};/" debian/changelog
+    source_distribution="$(dpkg-parsechangelog -SDistribution)"
+    if [[ "${source_distribution}" != "${DIST}" ]]; then
+        echo >&2 "Failed to retarget the package to distribution '${DIST}'."
+        exit 1
+    fi
+fi
+
 if [ -z "${ONLY_BINARY:-}" ]; then
     # Build the source package
     env \

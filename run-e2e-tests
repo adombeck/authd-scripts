@@ -106,10 +106,13 @@ E2E_DIR="${GIT_ROOT}/e2e-tests"
 # ------------------------------------------------------------------
 if [[ "${BUILD_WHAT}" == "authd" || "${BUILD_WHAT}" == "both" ]]; then
     echo "==> Building authd deb..."
+    BUILD_DIST_ARGS=()
+    [[ -n "${RELEASE:-}" ]] && BUILD_DIST_ARGS+=(--dist "${RELEASE}")
     (
         cd "${GIT_ROOT}"
         "${SCRIPT_DIR}/build-authd-deb" \
             --build-dir "${BUILD_DIR}/$(basename "${GIT_ROOT}")" \
+            "${BUILD_DIST_ARGS[@]}" \
             --no-lintian
     )
 fi
