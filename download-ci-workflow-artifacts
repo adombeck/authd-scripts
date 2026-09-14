@@ -18,9 +18,11 @@ Usage: $0 [options]
 
 Downloads workflow artifacts and extracts only selected files.
 
-The cache is checked against the requested extraction patterns. If the
-requested files are missing, the artifact is downloaded again. When an HTML
-file is requested, local files referenced by it are extracted as well.
+The cache is checked in the filesystem against the requested extraction
+patterns. If the requested files are missing, the artifact is downloaded
+again. When an HTML file is requested, local files referenced by it are
+extracted as well. A full '*' extraction is refreshed because filesystem
+contents cannot prove that every archive member is present.
 
 Required options:
   --repo <owner/repo>
@@ -274,6 +276,7 @@ html_reference_paths() {
     local directory="$1"
     local html_file="$2"
     local html_relative html_directory attribute reference candidate resolved
+    local shell_template="\${"
 
     html_relative="${html_file#"$directory"/}"
     html_directory="${html_relative%/*}"
@@ -290,7 +293,9 @@ html_reference_paths() {
 
         if [[ -z "$reference" || "$reference" == /* ||
             "$reference" == data:* || "$reference" == javascript:* ||
-            "$reference" == *"://"* ]]; then
+            "$reference" == *"://"* || "$reference" == *"{{"* ||
+            "$reference" == *"}}"* || "$reference" == *"$shell_template"* ||
+            "$reference" == *'}'* ]]; then
             continue
         fi
 
@@ -339,35 +344,15 @@ html_dependencies_present() {
 cache_satisfies_request() {
     local directory="$1"
     local metadata="$2"
-    local pattern extracted_file
+    local pattern
 
     [[ -f "$metadata" ]] || return 1
 
     for pattern in "${EXTRACT_PATTERNS[@]}"; do
         if [[ "$pattern" == "*" ]]; then
-            if ! jq -e --arg pattern "$pattern" \
-                '(.extract_patterns // []) | index($pattern) != null' \
-                "$metadata" >/dev/null; then
-                return 1
-            fi
-            if ! jq -e '.extracted_files // [] | length > 0' "$metadata" >/dev/null; then
-                return 1
-            fi
-            while IFS= read -r extracted_file; do
-                [[ -f "$directory/$extracted_file" ]] || return 1
-            done < <(jq -r '.extracted_files[]?' "$metadata")
-            continue
-        fi
-
-        if jq -e --arg pattern "$pattern" \
-            '(.extract_patterns // []) | index($pattern) != null' \
-            "$metadata" >/dev/null; then
-            if ! jq -e '.extracted_files // [] | length > 0' "$metadata" >/dev/null; then
-                return 1
-            fi
-            while IFS= read -r extracted_file; do
-                [[ -f "$directory/$extracted_file" ]] || return 1
-            done < <(jq -r '.extracted_files[]?' "$metadata")
+            # Filesystem contents cannot prove that every archive member was
+            # extracted, so refresh full-archive requests.
+            return 1
         elif pattern_matches_html "$pattern"; then
             html_dependencies_present "$directory" "$pattern" || return 1
         else
@@ -527,17 +512,6 @@ for i in "${!RUN_IDS[@]}"; do
         fi
         rm -f "$ZIP_FILE"
 
-        EXISTING_PATTERNS_JSON='[]'
-        if [[ -f "$META_FILE" ]]; then
-            EXISTING_PATTERNS_JSON="$(jq -c '.extract_patterns // []' "$META_FILE" 2>/dev/null || printf '[]')"
-        fi
-        REQUESTED_PATTERNS_JSON="$(printf '%s\n' "${EXTRACT_PATTERNS[@]}" | jq -Rsc 'split("\n") | map(select(length > 0))')"
-        ALL_PATTERNS_JSON="$(jq -cn \
-            --argjson existing "$EXISTING_PATTERNS_JSON" \
-            --argjson requested "$REQUESTED_PATTERNS_JSON" \
-            '$existing + $requested | unique')"
-        EXTRACTED_FILES_JSON="$(find "$DEST_DIR" -type f ! -name meta.json -printf '%P\n' | sort | jq -Rsc 'split("\n") | map(select(length > 0))')"
-
         jq -n \
             --arg run_id "$RUN_ID" \
             --arg pr_number "$RUN_PR" \
@@ -548,9 +522,7 @@ for i in "${!RUN_IDS[@]}"; do
             --arg conclusion "$RUN_CONCLUSION" \
             --arg artifact_name "$ARTIFACT_NAME" \
             --arg artifact_id "$ARTIFACT_ID" \
-            --argjson extract_patterns "$ALL_PATTERNS_JSON" \
-            --argjson extracted_files "$EXTRACTED_FILES_JSON" \
-            '{run_id: $run_id, pr_number: $pr_number, event: $event, event_id: $event_id, run_scope: $run_scope, run_date: $run_date, conclusion: $conclusion, artifact_name: $artifact_name, artifact_id: $artifact_id, extract_patterns: $extract_patterns, extracted_files: $extracted_files}' \
+            '{run_id: $run_id, pr_number: $pr_number, event: $event, event_id: $event_id, run_scope: $run_scope, run_date: $run_date, conclusion: $conclusion, artifact_name: $artifact_name, artifact_id: $artifact_id}' \
             > "$META_FILE"
 
         (( DOWNLOADED++ )) || true
