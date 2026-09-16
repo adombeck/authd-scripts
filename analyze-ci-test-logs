@@ -3,8 +3,8 @@
 Analyzes downloaded authd go test logs and prints failure statistics.
 
 Expects the directory layout produced by download-authd-artifacts.sh:
-  <input>/run-<id>/<artifact-name>/gotestfmt*.log
-  <input>/run-<id>/<artifact-name>/meta.json
+  <input>/[<scope>/]run-<id>/<artifact-name>/gotestfmt*.log
+  <input>/[<scope>/]run-<id>/<artifact-name>/meta.json
 """
 
 import argparse
@@ -194,7 +194,12 @@ def print_run(result: RunResult, show_errors: bool) -> None:
 # ── Entry point ────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    default_input = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share")) / "authd-artifacts"
+    default_input = Path(
+        os.environ.get(
+            "AUTHD_ARTIFACTS_DIR",
+            Path.home() / ".local/share/authd-artifacts",
+        )
+    )
 
     parser = argparse.ArgumentParser(
         description="Analyze downloaded authd go test logs and print failure statistics.",
@@ -213,7 +218,9 @@ def main() -> None:
         print(f"Input directory not found: {args.input}", file=sys.stderr)
         sys.exit(1)
 
-    run_dirs = sorted(d for d in args.input.iterdir() if d.is_dir() and d.name.startswith("run-"))
+    run_dirs = sorted(
+        d for d in args.input.rglob("run-*") if d.is_dir()
+    )
 
     if not run_dirs:
         print(f"No run directories found in {args.input}")
