@@ -5,6 +5,7 @@ set -euo pipefail
 JIRA_SERVER="https://warthogs.atlassian.net"
 JIRA_PROJECT="UDENG"
 CREDENTIALS_FILE="$HOME/.jira_credentials"
+CLAIM_HISTORY_FILE="${AUTHD_JIRA_CLAIM_HISTORY_FILE:-${XDG_STATE_HOME:-$HOME/.local/state}/authd-scripts/jira-claim-history.jsonl}"
 RETRY_TIMEOUT=30
 RETRY_INTERVAL=3
 
@@ -20,6 +21,8 @@ it as-is. Then:
   - Transitions it to "In Progress"
 
 Reads settings from $CREDENTIALS_FILE.
+When issue metadata changes, records the claim in:
+  $CLAIM_HISTORY_FILE
 EOF
 }
 
@@ -75,6 +78,152 @@ jira_put() {
         --request PUT \
         --data "$body" \
         "$JIRA_SERVER$path"
+}
+
+jira_issue_fields() {
+    local issue_json
+
+    if ! issue_json="$(jira_get "/rest/api/3/issue/$JIRA_ISSUE_KEY?fields=assignee,status")"; then
+        die "Failed to get current metadata for $JIRA_ISSUE_KEY"
+    fi
+
+    if ! printf '%s' "$issue_json" | python3 -c '
+import json
+import sys
+
+data = json.load(sys.stdin)
+fields = data.get("fields")
+if not isinstance(fields, dict):
+    raise SystemExit("Jira response did not contain issue fields")
+
+assignee = fields.get("assignee")
+if assignee is not None:
+    if not isinstance(assignee, dict) or not isinstance(assignee.get("accountId"), str):
+        raise SystemExit("Jira response contained an invalid assignee")
+    assignee = assignee["accountId"]
+
+status = fields.get("status")
+if not isinstance(status, dict):
+    raise SystemExit("Jira response did not contain issue status")
+status_id = status.get("id")
+status_name = status.get("name")
+if not isinstance(status_id, str) or not isinstance(status_name, str):
+    raise SystemExit("Jira response contained an invalid issue status")
+
+print(json.dumps({
+    "assignee": assignee,
+    "status": {"id": status_id, "name": status_name},
+}, separators=(",", ":")))
+'; then
+        die "Jira returned invalid metadata for $JIRA_ISSUE_KEY"
+    fi
+}
+
+jira_active_sprint_membership() {
+    local sprint_issues
+
+    if ! sprint_issues="$(
+        jira_get "/rest/agile/1.0/sprint/$SPRINT_ID/issue?jql=key%20%3D%20$JIRA_ISSUE_KEY&maxResults=1"
+    )"; then
+        die "Failed to check whether $JIRA_ISSUE_KEY is in sprint $SPRINT_ID"
+    fi
+
+    if ! printf '%s' "$sprint_issues" | python3 -c '
+import json
+import sys
+
+data = json.load(sys.stdin)
+issues = data.get("issues")
+if not isinstance(issues, list):
+    raise SystemExit("Jira response did not contain a sprint issue list")
+
+target = sys.argv[1]
+for issue in issues:
+    if not isinstance(issue, dict):
+        raise SystemExit("Jira response contained an invalid sprint issue")
+    if issue.get("key") == target:
+        print("true")
+        break
+else:
+    print("false")
+' "$JIRA_ISSUE_KEY"; then
+        die "Jira returned invalid sprint membership data for $JIRA_ISSUE_KEY"
+    fi
+}
+
+metadata_snapshot() {
+    local issue_fields="$1"
+    local in_active_sprint="$2"
+
+    if ! python3 - "$issue_fields" "$in_active_sprint" <<'PY'
+import json
+import sys
+
+fields = json.loads(sys.argv[1])
+if sys.argv[2] not in {"true", "false"}:
+    raise SystemExit("invalid sprint membership")
+
+fields["sprint"] = sys.argv[2] == "true"
+print(json.dumps(fields, separators=(",", ":")))
+PY
+    then
+        die "Could not create a Jira metadata snapshot"
+    fi
+}
+
+changed_metadata_fields() {
+    local before="$1"
+    local after="$2"
+
+    if ! python3 - "$before" "$after" <<'PY'
+import json
+import sys
+
+before = json.loads(sys.argv[1])
+after = json.loads(sys.argv[2])
+changed = [
+    field
+    for field in ("assignee", "sprint", "status")
+    if before.get(field) != after.get(field)
+]
+print(json.dumps(changed, separators=(",", ":")))
+PY
+    then
+        die "Could not compare Jira metadata snapshots"
+    fi
+}
+
+record_claim_history() {
+    local changed_fields="$1"
+
+    mkdir -p -- "$(dirname -- "$CLAIM_HISTORY_FILE")" \
+        || die "Could not create claim history directory"
+
+    if ! python3 - "$CLAIM_HISTORY_FILE" "$JIRA_ISSUE_KEY" \
+        "$JIRA_SERVER/browse/$JIRA_ISSUE_KEY" "$changed_fields" <<'PY'
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+path = Path(sys.argv[1])
+changed_fields = json.loads(sys.argv[4])
+if not isinstance(changed_fields, list) or not changed_fields:
+    raise SystemExit("claim history requires changed metadata fields")
+
+entry = {
+    "claimed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    "issue_key": sys.argv[2],
+    "issue_url": sys.argv[3],
+    "changed_fields": changed_fields,
+}
+with path.open("a", encoding="utf-8") as history:
+    json.dump(entry, history, separators=(",", ":"))
+    history.write("\n")
+PY
+    then
+        die "Could not record claim history in $CLAIM_HISTORY_FILE"
+    fi
 }
 
 # ── Resolve Jira issue key ────────────────────────────────────────────────────
@@ -169,41 +318,118 @@ else:
 echo "Active sprint ID: $SPRINT_ID"
 
 # ── Get current user's account ID ────────────────────────────────────────────
-MY_ACCOUNT_ID=$(jira_get "/rest/api/3/myself" | python3 -c "import sys,json; print(json.load(sys.stdin)['accountId'])") \
+MYSELF_JSON=$(jira_get "/rest/api/3/myself") \
     || die "Failed to get current user info"
+MY_ACCOUNT_ID=$(printf '%s' "$MYSELF_JSON" | python3 -c '
+import json
+import sys
+
+account_id = json.load(sys.stdin).get("accountId")
+if not isinstance(account_id, str) or not account_id:
+    raise SystemExit("Jira response did not contain a valid account ID")
+print(account_id)
+') || die "Jira returned invalid current user data"
+
+# ── Snapshot current metadata ────────────────────────────────────────────────
+echo "Fetching current metadata for $JIRA_ISSUE_KEY..."
+ISSUE_FIELDS_BEFORE=$(jira_issue_fields)
+SPRINT_MEMBER_BEFORE=$(jira_active_sprint_membership)
+METADATA_BEFORE=$(metadata_snapshot "$ISSUE_FIELDS_BEFORE" "$SPRINT_MEMBER_BEFORE")
+
+CURRENT_ASSIGNEE_ID=$(printf '%s' "$ISSUE_FIELDS_BEFORE" | python3 -c '
+import json
+import sys
+
+assignee = json.load(sys.stdin).get("assignee")
+if assignee is not None and not isinstance(assignee, str):
+    raise SystemExit("Jira metadata contained an invalid assignee")
+print(assignee or "")
+') || die "Could not read current Jira assignee"
+
+CURRENT_STATUS_NAME=$(printf '%s' "$ISSUE_FIELDS_BEFORE" | python3 -c '
+import json
+import sys
+
+status = json.load(sys.stdin).get("status")
+if not isinstance(status, dict) or not isinstance(status.get("name"), str):
+    raise SystemExit("Jira metadata contained an invalid status")
+print(status["name"])
+') || die "Could not read current Jira status"
+
+# Resolve the transition before changing any metadata so a missing workflow
+# transition cannot leave the issue only partially claimed.
+TRANSITION_ID=""
+if [[ "${CURRENT_STATUS_NAME,,}" != "in progress" ]]; then
+    echo "Fetching available transitions..."
+    TRANSITIONS=$(jira_get "/rest/api/3/issue/$JIRA_ISSUE_KEY/transitions") \
+        || die "Failed to fetch transitions"
+
+    TRANSITION_ID=$(printf '%s' "$TRANSITIONS" | python3 -c '
+import json
+import sys
+
+data = json.load(sys.stdin)
+for transition in data.get("transitions", []):
+    if (
+        isinstance(transition, dict)
+        and isinstance(transition.get("name"), str)
+        and transition["name"].casefold() == "in progress"
+    ):
+        transition_id = transition.get("id")
+        if not isinstance(transition_id, str) or not transition_id:
+            raise SystemExit("Jira response contained an invalid transition ID")
+        print(transition_id)
+        break
+') || die "Jira returned invalid transition data"
+
+    [[ -n "$TRANSITION_ID" ]] \
+        || die "Could not find 'In Progress' transition for $JIRA_ISSUE_KEY"
+fi
 
 # ── Assign ticket to current user ─────────────────────────────────────────────
-echo "Assigning $JIRA_ISSUE_KEY to yourself..."
-jira_put "/rest/api/3/issue/$JIRA_ISSUE_KEY/assignee" \
-    "{\"accountId\": \"$MY_ACCOUNT_ID\"}" > /dev/null
-echo "  Done."
+if [[ "$CURRENT_ASSIGNEE_ID" == "$MY_ACCOUNT_ID" ]]; then
+    echo "$JIRA_ISSUE_KEY is already assigned to you."
+else
+    echo "Assigning $JIRA_ISSUE_KEY to yourself..."
+    jira_put "/rest/api/3/issue/$JIRA_ISSUE_KEY/assignee" \
+        "{\"accountId\": \"$MY_ACCOUNT_ID\"}" > /dev/null
+    echo "  Done."
+fi
 
 # ── Add ticket to active sprint ───────────────────────────────────────────────
-echo "Adding $JIRA_ISSUE_KEY to sprint $SPRINT_ID..."
-jira_post "/rest/agile/1.0/sprint/$SPRINT_ID/issue" \
-    "{\"issues\": [\"$JIRA_ISSUE_KEY\"]}" > /dev/null
-echo "  Done."
+if [[ "$SPRINT_MEMBER_BEFORE" == "true" ]]; then
+    echo "$JIRA_ISSUE_KEY is already in active sprint $SPRINT_ID."
+else
+    echo "Adding $JIRA_ISSUE_KEY to sprint $SPRINT_ID..."
+    jira_post "/rest/agile/1.0/sprint/$SPRINT_ID/issue" \
+        "{\"issues\": [\"$JIRA_ISSUE_KEY\"]}" > /dev/null
+    echo "  Done."
+fi
 
 # ── Transition to In Progress ─────────────────────────────────────────────────
-echo "Fetching available transitions..."
-TRANSITIONS=$(jira_get "/rest/api/3/issue/$JIRA_ISSUE_KEY/transitions") \
-    || die "Failed to fetch transitions"
+if [[ -z "$TRANSITION_ID" ]]; then
+    echo "$JIRA_ISSUE_KEY is already In Progress."
+else
+    echo "Transitioning $JIRA_ISSUE_KEY to In Progress..."
+    jira_post "/rest/api/3/issue/$JIRA_ISSUE_KEY/transitions" \
+        "{\"transition\": {\"id\": \"$TRANSITION_ID\"}}" > /dev/null
+    echo "  Done."
+fi
 
-TRANSITION_ID=$(echo "$TRANSITIONS" | python3 -c "
-import sys, json
-data = json.load(sys.stdin)
-for t in data.get('transitions', []):
-    if t['name'].lower() == 'in progress':
-        print(t['id'])
-        break
-")
+# Confirm the semantic metadata change instead of treating successful API
+# requests as proof that the issue changed.
+echo "Verifying Jira metadata..."
+ISSUE_FIELDS_AFTER=$(jira_issue_fields)
+SPRINT_MEMBER_AFTER=$(jira_active_sprint_membership)
+METADATA_AFTER=$(metadata_snapshot "$ISSUE_FIELDS_AFTER" "$SPRINT_MEMBER_AFTER")
+CHANGED_FIELDS=$(changed_metadata_fields "$METADATA_BEFORE" "$METADATA_AFTER")
 
-[[ -n "$TRANSITION_ID" ]] || die "Could not find 'In Progress' transition for $JIRA_ISSUE_KEY"
-
-echo "Transitioning $JIRA_ISSUE_KEY to In Progress..."
-jira_post "/rest/api/3/issue/$JIRA_ISSUE_KEY/transitions" \
-    "{\"transition\": {\"id\": \"$TRANSITION_ID\"}}" > /dev/null
-echo "  Done."
+if [[ "$CHANGED_FIELDS" == "[]" ]]; then
+    echo "No Jira issue metadata changed; no claim history entry added."
+else
+    record_claim_history "$CHANGED_FIELDS"
+    echo "Recorded claim history in $CLAIM_HISTORY_FILE."
+fi
 
 echo ""
 echo "✓ $JIRA_ISSUE_KEY is assigned to you, in the active sprint, and In Progress."
