@@ -20,6 +20,7 @@ it as-is. Then:
   - Adds it to the active sprint
   - Transitions it to "In Progress"
 
+Only issues in the "Untriaged" or "Triaged" state are changed.
 Reads settings from $CREDENTIALS_FILE.
 When issue metadata changes, records the claim in:
   $CLAIM_HISTORY_FILE
@@ -355,6 +356,14 @@ if not isinstance(status, dict) or not isinstance(status.get("name"), str):
     raise SystemExit("Jira metadata contained an invalid status")
 print(status["name"])
 ') || die "Could not read current Jira status"
+
+case "$CURRENT_STATUS_NAME" in
+    Untriaged|Triaged)
+        ;;
+    *)
+        die "Refusing to claim $JIRA_ISSUE_KEY: current status is \"$CURRENT_STATUS_NAME\"; expected Untriaged or Triaged"
+        ;;
+esac
 
 # Resolve the transition before changing any metadata so a missing workflow
 # transition cannot leave the issue only partially claimed.
