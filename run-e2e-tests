@@ -27,6 +27,7 @@ Options:
   --repo <dir>         Path to the authd repository (default: current directory)
   --build-dir <dir>    Directory for build artifacts (default: ../build relative
                        to the repo root)
+  -t, --test <name>    Run only the named test case (can be repeated)
   -h, --help           Show this help and exit
 
 Any remaining arguments are passed through to run-tests.sh (e.g. test files,
@@ -38,6 +39,7 @@ BUILD_WHAT="both"
 BROKER="${BROKER:-}"
 RELEASE="${RELEASE:-}"
 REPO_DIR=""
+TEST_ARGS=()
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -59,6 +61,15 @@ while [[ $# -gt 0 ]]; do
             ;;
         --build-dir)
             BUILD_DIR="$2"
+            shift 2
+            ;;
+        --test|-t)
+            if [[ $# -lt 2 ]]; then
+                echo >&2 "Error: $1 requires an argument"
+                usage >&2
+                exit 1
+            fi
+            TEST_ARGS+=(--test "$2")
             shift 2
             ;;
         -h|--help)
@@ -200,6 +211,7 @@ echo "==> Running e2e tests..."
 RUN_ARGS=()
 [[ -n "${BROKER:-}" ]]  && RUN_ARGS+=(--broker  "${BROKER}")
 [[ -n "${RELEASE:-}" ]] && RUN_ARGS+=(--release "${RELEASE}")
+RUN_ARGS+=("${TEST_ARGS[@]}")
 
 (
     cd "${GIT_ROOT}"
