@@ -27,6 +27,7 @@ Options:
   --repo <dir>         Path to the authd repository (default: current directory)
   --build-dir <dir>    Directory for build artifacts (default: ../build relative
                        to the repo root)
+  --local-deb <path>   Local .deb file or directory for the e2e VM (can be repeated)
   -t, --test <name>    Run only the named test case (can be repeated)
   -h, --help           Show this help and exit
 
@@ -39,6 +40,7 @@ BUILD_WHAT="both"
 BROKER="${BROKER:-}"
 RELEASE="${RELEASE:-}"
 REPO_DIR=""
+LOCAL_DEB_ARGS=()
 TEST_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -61,6 +63,15 @@ while [[ $# -gt 0 ]]; do
             ;;
         --build-dir)
             BUILD_DIR="$2"
+            shift 2
+            ;;
+        --local-deb)
+            if [[ $# -lt 2 ]]; then
+                echo >&2 "Error: $1 requires an argument"
+                usage >&2
+                exit 1
+            fi
+            LOCAL_DEB_ARGS+=(--local-deb "$2")
             shift 2
             ;;
         --test|-t)
@@ -196,6 +207,7 @@ PROVISION_ARGS=()
 [[ -n "${BROKER:-}" ]]      && PROVISION_ARGS+=(--broker  "${BROKER}")
 [[ -n "${RELEASE:-}" ]]     && PROVISION_ARGS+=(--release "${RELEASE}")
 PROVISION_ARGS+=(--authd-deb "${AUTHD_DEB}")
+PROVISION_ARGS+=("${LOCAL_DEB_ARGS[@]}")
 [[ -n "${BROKER_SNAP:-}" ]] && PROVISION_ARGS+=(--broker-snap "${BROKER_SNAP}")
 
 (
@@ -211,6 +223,7 @@ echo "==> Running e2e tests..."
 RUN_ARGS=()
 [[ -n "${BROKER:-}" ]]  && RUN_ARGS+=(--broker  "${BROKER}")
 [[ -n "${RELEASE:-}" ]] && RUN_ARGS+=(--release "${RELEASE}")
+RUN_ARGS+=("${LOCAL_DEB_ARGS[@]}")
 RUN_ARGS+=("${TEST_ARGS[@]}")
 
 (
