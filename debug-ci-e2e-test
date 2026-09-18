@@ -128,9 +128,7 @@ def main():
         die(f"authd repository not found: {AUTHD_REPO}")
 
     owner, repo = "canonical", "authd"
-    run = get_run_metadata(owner, repo, run_id)
-    run_date = run["created_at"][:10]
-    artifact_branch = run["head_branch"]
+    get_run_metadata(owner, repo, run_id)
 
     print(f"PR: {owner}/{repo}#{pr_number}")
     print(f"Fetching branch for PR #{pr_number}...")
@@ -156,11 +154,8 @@ def main():
     download_command = (
         "./.scripts/download-ci-workflow-artifacts "
         f"--repo {shlex.quote(repository)} "
-        "--workflow e2e-tests.yaml "
-        f"--branch {shlex.quote(artifact_branch)} "
-        f"--from {shlex.quote(run_date)} "
-        f"--to {shlex.quote(run_date)} "
-        "--artifact-prefix e2e-tests- "
+        f"--run-id {shlex.quote(run_id)} "
+        f"--artifact-prefix {shlex.quote(artifact_name)} "
         "--no-job-filter "
         '--output "$HOME/.local/share/authd-e2e-artifacts" '
         "--extract '*.html'"
