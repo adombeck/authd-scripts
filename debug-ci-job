@@ -212,7 +212,7 @@ def main():
         "else "
         "read -e -i \"$_p\" -p $'Edit prompt, then press Enter:\\n' _p; "
         "fi && "
-        "copilot --autopilot --allow-all -i \"$_p\""
+        "copilot --allow-e2e-tests --autopilot --allow-all -i \"$_p\""
     ).format(worktree=w, prompt=q)
     guake_call("execute_command", launch + "\n")
 
