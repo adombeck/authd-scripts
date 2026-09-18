@@ -155,7 +155,7 @@ def main():
         "./.scripts/download-ci-workflow-artifacts "
         f"--repo {shlex.quote(repository)} "
         f"--run-id {shlex.quote(run_id)} "
-        f"--artifact-prefix {shlex.quote(artifact_name)} "
+        f"--artifact {shlex.quote(artifact_name)} "
         "--no-job-filter "
         '--output "$HOME/.local/share/authd-e2e-artifacts" '
         "--extract '*.html'"
@@ -172,7 +172,7 @@ def main():
         f"{owner}/{repo} PR #{pr_number} on branch {branch_name}. "
         "The hosted e2e log is outside GitHub and is not directly accessible "
         f"to you. The corresponding GitHub Actions artifact is "
-        f"`{artifact_name}`. Fetch the artifacts with the "
+        f"`{artifact_name}`. Fetch it with the "
         "`download-ci-workflow-artifacts` script, for example:\n\n"
         f"{download_command}\n\n"
         f"Inspect the matching artifact under `{artifact_path}`, especially "

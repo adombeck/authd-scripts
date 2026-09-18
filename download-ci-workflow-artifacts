@@ -36,8 +36,13 @@ Required options:
       Branch name to filter runs by.
       Required unless --run-id is provided.
 
+  --artifact <name>
+      Download only the artifact with this exact name. Can be repeated.
+      Required unless --artifact-prefix is provided.
+
   --artifact-prefix <prefix>
       Only download artifacts whose names start with this prefix.
+      Required unless --artifact is provided.
 
   --output <dir>
       Directory where artifacts are extracted.
@@ -72,6 +77,7 @@ Job filtering (choose one mode):
 EOF
 }
 
+ARTIFACT_NAMES=()
 EXTRACT_PATTERNS=()
 
 while [[ $# -gt 0 ]]; do
@@ -90,6 +96,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --run-id)
             RUN_ID_FILTER="$2"
+            shift 2
+            ;;
+        --artifact)
+            ARTIFACT_NAMES+=("$2")
             shift 2
             ;;
         --artifact-prefix)
@@ -138,11 +148,29 @@ done
 
 NO_JOB_FILTER=${NO_JOB_FILTER:-0}
 
-if [[ -z "${REPO:-}" || -z "${ARTIFACT_PREFIX:-}" || -z "${OUTPUT_DIR:-}" ]]; then
+if [[ -z "${REPO:-}" || -z "${OUTPUT_DIR:-}" ]]; then
     echo "Missing required options." >&2
     usage
     exit 1
 fi
+
+if [[ -z "${ARTIFACT_PREFIX:-}" && ${#ARTIFACT_NAMES[@]} -eq 0 ]]; then
+    echo "Provide --artifact-prefix or at least one --artifact." >&2
+    usage
+    exit 1
+fi
+
+if [[ -n "${ARTIFACT_PREFIX:-}" && ${#ARTIFACT_NAMES[@]} -gt 0 ]]; then
+    echo "Use either --artifact-prefix or --artifact, not both." >&2
+    exit 1
+fi
+
+for artifact_name in "${ARTIFACT_NAMES[@]}"; do
+    if [[ -z "$artifact_name" ]]; then
+        echo "--artifact requires a non-empty artifact name." >&2
+        exit 1
+    fi
+done
 
 if [[ -n "${RUN_ID_FILTER:-}" ]]; then
     if ! [[ "$RUN_ID_FILTER" =~ ^[0-9]+$ ]]; then
@@ -203,7 +231,11 @@ else
     echo "Workflow   : $WORKFLOW"
     echo "Branch     : $BRANCH"
 fi
-echo "Artifacts  : prefix '$ARTIFACT_PREFIX'"
+if [[ ${#ARTIFACT_NAMES[@]} -gt 0 ]]; then
+    echo "Artifacts  : ${ARTIFACT_NAMES[*]}"
+else
+    echo "Artifacts  : prefix '$ARTIFACT_PREFIX'"
+fi
 if [[ "$NO_JOB_FILTER" -eq 1 ]]; then
     echo "Job filter : disabled"
 else
@@ -439,10 +471,25 @@ for i in "${!RUN_IDS[@]}"; do
         fi
     fi
 
-    ARTIFACTS_JSON=$(gh api \
-        -H "Accept: application/vnd.github+json" \
-        "/repos/${REPO}/actions/runs/${RUN_ID}/artifacts?per_page=100" \
-        --jq ".artifacts[] | select(.name | startswith(\"$ARTIFACT_PREFIX\")) | {id: .id, name: .name}")
+    ARTIFACTS_ENDPOINT="/repos/${REPO}/actions/runs/${RUN_ID}/artifacts?per_page=100"
+    if [[ ${#ARTIFACT_NAMES[@]} -gt 0 ]]; then
+        SELECTED_ARTIFACTS_JSON=$(printf '%s\n' "${ARTIFACT_NAMES[@]}" | jq -R -s 'split("\n")[:-1]')
+        ARTIFACTS_JSON=$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            "$ARTIFACTS_ENDPOINT" |
+            jq -c --argjson selected_names "$SELECTED_ARTIFACTS_JSON" '
+                .artifacts[]
+                | select(.name as $name | ($selected_names | index($name)) != null)
+                | {id: .id, name: .name}')
+    else
+        ARTIFACTS_JSON=$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            "$ARTIFACTS_ENDPOINT" |
+            jq -c --arg prefix "$ARTIFACT_PREFIX" '
+                .artifacts[]
+                | select(.name | startswith($prefix))
+                | {id: .id, name: .name}')
+    fi
 
     if [[ -z "$ARTIFACTS_JSON" ]]; then
         echo "  No matching artifacts found."
