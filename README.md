@@ -22,3 +22,9 @@ Execute the scripts from the authd repo, like this:
 ```
 
 Check the usage messages of the scripts, they all support `--help` (except the pre-push hook).
+
+To debug an end-to-end test run from its hosted log URL:
+
+```
+.scripts/debug-ci-e2e-test 'https://authd-e2e-test-logs.adrian-dombeck.workers.dev/pr-1927/run-35341372449-1/resolute-authd-msentraid/log.html'
+```

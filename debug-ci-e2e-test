@@ -1,0 +1,211 @@
+#!/usr/bin/env python3
+"""
+debug-ci-e2e-test - create a worktree and launch Copilot CLI for a failed
+authd end-to-end test run.
+
+Usage: debug-ci-e2e-test <e2e-test-log-url>
+
+Supports:
+  https://authd-e2e-test-logs.adrian-dombeck.workers.dev/pr-1927/run-35341372449-1/resolute-authd-msentraid/log.html
+"""
+
+import json
+import re
+import shlex
+import subprocess
+import sys
+from pathlib import Path
+from urllib.parse import urlsplit
+
+AUTHD_REPO = Path("~/projects/authd").expanduser()
+
+GUAKE_DBUS_DEST = "org.guake3.RemoteControl"
+GUAKE_DBUS_OBJECT = "/org/guake3/RemoteControl"
+GUAKE_DBUS_IFACE = "org.guake3.RemoteControl"
+
+E2E_LOG_HOST = "authd-e2e-test-logs.adrian-dombeck.workers.dev"
+E2E_LOG_PATH_RE = re.compile(
+    r"^/pr-(?P<pr_number>[0-9]+)/run-(?P<run_id>[0-9]+)-"
+    r"(?P<run_attempt>[0-9]+)/(?P<target>[^/]+)/log\.html$"
+)
+
+
+def die(msg):
+    print(f"Error: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def parse_e2e_log_url(url):
+    try:
+        parsed = urlsplit(url)
+    except ValueError as error:
+        die(f"Invalid e2e test log URL: {error}")
+
+    if (
+        parsed.scheme != "https"
+        or parsed.netloc != E2E_LOG_HOST
+        or parsed.fragment
+    ):
+        die(f"Unrecognised e2e test log URL: {url}")
+
+    match = E2E_LOG_PATH_RE.fullmatch(parsed.path)
+    if not match:
+        die(f"Unrecognised e2e test log URL: {url}")
+
+    return (
+        match.group("pr_number"),
+        match.group("run_id"),
+        match.group("run_attempt"),
+        match.group("target"),
+    )
+
+
+def gh_api_json(path):
+    result = subprocess.run(
+        ["gh", "api", path],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        die(f"gh api {path} failed: {result.stderr.strip()}")
+
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        die(f"gh api {path} returned invalid JSON: {error}")
+
+
+def get_pr_branch(owner, repo, number):
+    pull_request = gh_api_json(f"repos/{owner}/{repo}/pulls/{number}")
+    head = pull_request.get("head")
+    branch_name = head.get("ref") if isinstance(head, dict) else None
+    if not branch_name:
+        die(f"PR #{number} does not have a head branch")
+    return branch_name
+
+
+def get_run_metadata(owner, repo, run_id):
+    run = gh_api_json(f"repos/{owner}/{repo}/actions/runs/{run_id}")
+    if not isinstance(run, dict):
+        die(f"Workflow run {run_id} returned an invalid response")
+
+    created_at = run.get("created_at")
+    if not isinstance(created_at, str) or not re.fullmatch(
+        r"[0-9]{4}-[0-9]{2}-[0-9]{2}T.*", created_at
+    ):
+        die(f"Workflow run {run_id} did not include a valid creation date")
+
+    head_branch = run.get("head_branch")
+    if not isinstance(head_branch, str) or not head_branch:
+        die(f"Workflow run {run_id} did not include a head branch")
+
+    return run
+
+
+def guake_call(method, *args):
+    subprocess.run(
+        ["gdbus", "call", "--session",
+         "--dest", GUAKE_DBUS_DEST,
+         "--object-path", GUAKE_DBUS_OBJECT,
+         "--method", f"{GUAKE_DBUS_IFACE}.{method}"] + list(args),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def main():
+    if len(sys.argv) != 2 or sys.argv[1] in ("-h", "--help"):
+        print(__doc__.strip(), file=sys.stderr)
+        sys.exit(
+            0 if len(sys.argv) == 2 and sys.argv[1] in ("-h", "--help")
+            else 1
+        )
+
+    url = sys.argv[1]
+    pr_number, run_id, run_attempt, target = parse_e2e_log_url(url)
+
+    if not AUTHD_REPO.is_dir():
+        die(f"authd repository not found: {AUTHD_REPO}")
+
+    owner, repo = "canonical", "authd"
+    run = get_run_metadata(owner, repo, run_id)
+    run_date = run["created_at"][:10]
+    artifact_branch = run["head_branch"]
+
+    print(f"PR: {owner}/{repo}#{pr_number}")
+    print(f"Fetching branch for PR #{pr_number}...")
+    branch_name = get_pr_branch(owner, repo, pr_number)
+    print(f"Branch: {branch_name}")
+
+    worktree_dirname = branch_name.replace("/", "-")
+    worktree_path = AUTHD_REPO.parent / f"authd-{worktree_dirname}"
+
+    print(f"Ensuring worktree at {worktree_path}...")
+    result = subprocess.run(["authd-worktree", branch_name], cwd=AUTHD_REPO)
+    if result.returncode != 0:
+        die("Failed to create/open worktree")
+    if not worktree_path.is_dir():
+        die(f"Worktree was not created: {worktree_path}")
+
+    github_run_url = (
+        f"https://github.com/{owner}/{repo}/actions/runs/{run_id}"
+        f"/attempts/{run_attempt}"
+    )
+    artifact_name = f"e2e-tests-{target}-{run_id}-{run_attempt}"
+    repository = f"{owner}/{repo}"
+    download_command = (
+        "./.scripts/download-ci-workflow-artifacts "
+        f"--repo {shlex.quote(repository)} "
+        "--workflow e2e-tests.yaml "
+        f"--branch {shlex.quote(artifact_branch)} "
+        f"--from {shlex.quote(run_date)} "
+        f"--to {shlex.quote(run_date)} "
+        "--artifact-prefix e2e-tests- "
+        "--no-job-filter "
+        '--output "$HOME/.local/share/authd-e2e-artifacts" '
+        "--extract '*.html'"
+    )
+    artifact_path = (
+        f"$HOME/.local/share/authd-e2e-artifacts/pr-{pr_number}/"
+        f"run-{run_id}/{artifact_name}"
+    )
+
+    print(f"Opening Guake tab for {worktree_path}...")
+
+    prompt = (
+        f"Debug the failed authd end-to-end test run at {github_run_url} for "
+        f"{owner}/{repo} PR #{pr_number} on branch {branch_name}. "
+        "The hosted e2e log is outside GitHub and is not directly accessible "
+        f"to you. The corresponding GitHub Actions artifact is "
+        f"`{artifact_name}`. Fetch the artifacts with the "
+        "`download-ci-workflow-artifacts` script, for example:\n\n"
+        f"{download_command}\n\n"
+        f"Inspect the matching artifact under `{artifact_path}`, especially "
+        "`log.html` and its referenced files. Identify the root cause, "
+        "implement the fix, and run relevant tests."
+    )
+    q = shlex.quote(prompt)
+    w = shlex.quote(str(worktree_path))
+    # Prefix the command with a space so it isn't recorded in shell history.
+    launch = (
+        " cd {worktree}; clear; "
+        "_p={prompt}; "
+        "if [ -n \"$ZSH_VERSION\" ]; then "
+        "vared -p $'Edit prompt, then press Enter:\\n' _p; "
+        "else "
+        "read -e -i \"$_p\" -p $'Edit prompt, then press Enter:\\n' _p; "
+        "fi && "
+        "copilot --allow-e2e-tests --autopilot --allow-all -i \"$_p\""
+    ).format(worktree=w, prompt=q)
+    guake_call("execute_command", launch + "\n")
+
+    guake_call("show")
+
+    print(
+        f"Done! Prompt staged in new Guake tab for {github_run_url}. "
+        "Edit it if needed, then press Enter to run Copilot."
+    )
+
+
+if __name__ == "__main__":
+    main()
