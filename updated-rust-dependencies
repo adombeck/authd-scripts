@@ -26,13 +26,29 @@ old_versions_file="${tempdir}/old-versions.txt"
 new_versions_file="${tempdir}/new-versions.txt"
 
 git checkout -q "$GIT_REF_OLD"
-cargo metadata --format-version 1 --no-deps | \
-    jq -r '.packages[] | .dependencies[]? | "\(.name) \(.req)"' \
+cargo metadata --format-version 1 --locked | \
+    jq -r '
+        (.packages | map({key: .id, value: {name: .name, version: .version}}) | from_entries) as $packages |
+        .workspace_members as $workspace_members |
+        .resolve.nodes[]? |
+        select(.id as $id | $workspace_members | index($id)) |
+        .deps[] |
+        $packages[.pkg] |
+        "\(.name) \(.version)"
+    ' \
     > "${old_versions_file}"
 
 git checkout -q "${GIT_REF_NEW}"
-cargo metadata --format-version 1 --no-deps | \
-    jq -r '.packages[] | .dependencies[]? | "\(.name) \(.req)"' \
+cargo metadata --format-version 1 --locked | \
+    jq -r '
+        (.packages | map({key: .id, value: {name: .name, version: .version}}) | from_entries) as $packages |
+        .workspace_members as $workspace_members |
+        .resolve.nodes[]? |
+        select(.id as $id | $workspace_members | index($id)) |
+        .deps[] |
+        $packages[.pkg] |
+        "\(.name) \(.version)"
+    ' \
     > "${new_versions_file}"
 
 comm -13 <(sort "${old_versions_file}") <(sort "${new_versions_file}") | \
