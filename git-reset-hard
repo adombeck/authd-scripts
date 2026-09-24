@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  printf 'Usage: %s <ref>\n' "${0##*/}" >&2
+}
+
+if [[ $# -ne 1 ]]; then
+  usage
+  exit 2
+fi
+
+ref=$1
+if ! commit=$(git rev-parse --verify --end-of-options "${ref}^{commit}" 2>/dev/null); then
+  printf 'Error: %s does not resolve to a commit\n' "$ref" >&2
+  exit 2
+fi
+
+# Reset the superproject first so uninitialized submodules can be set up.
+git --no-pager -c submodule.recurse=false reset --hard "$commit"
+exec git --no-pager -c submodule.recurse=false submodule update --init --force --recursive
