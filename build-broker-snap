@@ -92,7 +92,40 @@ cd "${SNAP_SRC_DIR}"
 
 go mod vendor
 
+# Variant preparation replaces snap/snapcraft.yaml, which the version script
+# would otherwise mistake for an uncommitted source change. Preserve genuine
+# edits to that file as dirty, just as for changes to any other file. Some
+# branches only generate this ignored file during variant preparation, so it
+# may be absent from the clean build clone.
+VARIANT_WAS_DIRTY=$(git status --porcelain -- snap/snapcraft.yaml)
+VARIANT_BACKUP_DIR=$(mktemp -d)
+VARIANT_BACKUP_READY=
+VARIANT_ASSUMED_UNCHANGED=
+restore_variant() {
+    trap - EXIT
+    if [ -n "${VARIANT_ASSUMED_UNCHANGED:-}" ]; then
+        git update-index --no-assume-unchanged -- snap/snapcraft.yaml
+    fi
+    if [ -n "${VARIANT_BACKUP_READY:-}" ]; then
+        rm -f -- snap/snapcraft.yaml
+        mv -- "${VARIANT_BACKUP_DIR}/snapcraft.yaml" snap/snapcraft.yaml
+    else
+        rm -f -- "${VARIANT_BACKUP_DIR}/snapcraft.yaml"
+    fi
+    rmdir -- "${VARIANT_BACKUP_DIR}"
+}
+trap restore_variant EXIT
+
+if [ -e snap/snapcraft.yaml ] || [ -L snap/snapcraft.yaml ]; then
+    cp -a -- snap/snapcraft.yaml "${VARIANT_BACKUP_DIR}/snapcraft.yaml"
+    VARIANT_BACKUP_READY=1
+fi
 ./snap/scripts/prepare-variant --broker "${BROKER}"
+if [ -z "${VARIANT_WAS_DIRTY}" ] &&
+    git ls-files --error-unmatch -- snap/snapcraft.yaml >/dev/null 2>&1; then
+    git update-index --assume-unchanged -- snap/snapcraft.yaml
+    VARIANT_ASSUMED_UNCHANGED=1
+fi
 
 # Wrapper that runs snapcraft and checks for a known failure mode: after a
 # snapd upgrade on the host, the snap-confine AppArmor profiles inside the LXD
@@ -136,6 +169,7 @@ run_snapcraft() {
 run_snapcraft clean broker version
 
 time run_snapcraft pack "$@"
+restore_variant
 
 # shellcheck disable=SC2012 # The .snap file doesn't contain non-alphanumeric characters
 SNAP_FILE=$(ls -t *.snap | head -n1)
