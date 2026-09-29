@@ -7,6 +7,7 @@ Usage: debug-ci-e2e-test <e2e-test-log-url>
 
 Supports:
   https://authd-e2e-test-logs.adrian-dombeck.workers.dev/pr-1927/run-35341372449-1/resolute-authd-msentraid/log.html
+  https://authd-e2e-test-logs.adrian-dombeck.workers.dev/push-36452199482/run-36452199482-1/noble-authd-msentraid/log.html
 """
 
 import json
@@ -25,7 +26,9 @@ GUAKE_DBUS_IFACE = "org.guake3.RemoteControl"
 
 E2E_LOG_HOST = "authd-e2e-test-logs.adrian-dombeck.workers.dev"
 E2E_LOG_PATH_RE = re.compile(
-    r"^/pr-(?P<pr_number>[0-9]+)/run-(?P<run_id>[0-9]+)-"
+    r"^/(?:pr-(?P<pr_number>[0-9]+)"
+    r"|(?P<event>[a-z][a-z0-9_-]*)-(?P<event_run_id>[0-9]+))"
+    r"/run-(?P<run_id>[0-9]+)-"
     r"(?P<run_attempt>[0-9]+)/(?P<target>[^/]+)/log\.html$"
 )
 
@@ -52,9 +55,16 @@ def parse_e2e_log_url(url):
     if not match:
         die(f"Unrecognised e2e test log URL: {url}")
 
+    pr_number = match.group("pr_number")
+    event = match.group("event")
+    run_id = match.group("run_id")
+    if event and match.group("event_run_id") != run_id:
+        die(f"Workflow run ID in e2e test log URL does not match: {url}")
+
     return (
-        match.group("pr_number"),
-        match.group("run_id"),
+        pr_number,
+        event,
+        run_id,
         match.group("run_attempt"),
         match.group("target"),
     )
@@ -95,6 +105,10 @@ def get_run_metadata(owner, repo, run_id):
     ):
         die(f"Workflow run {run_id} did not include a valid creation date")
 
+    event = run.get("event")
+    if not isinstance(event, str) or not event:
+        die(f"Workflow run {run_id} did not include an event name")
+
     head_branch = run.get("head_branch")
     if not isinstance(head_branch, str) or not head_branch:
         die(f"Workflow run {run_id} did not include a head branch")
@@ -122,18 +136,40 @@ def main():
         )
 
     url = sys.argv[1]
-    pr_number, run_id, run_attempt, target = parse_e2e_log_url(url)
+    pr_number, event, run_id, run_attempt, target = parse_e2e_log_url(url)
 
     if not AUTHD_REPO.is_dir():
         die(f"authd repository not found: {AUTHD_REPO}")
 
     owner, repo = "canonical", "authd"
-    get_run_metadata(owner, repo, run_id)
+    run = get_run_metadata(owner, repo, run_id)
+    expected_event = "pull_request" if pr_number else event
+    if run["event"] != expected_event:
+        die(
+            f"Workflow run {run_id} is a {run['event']} event, "
+            f"but the URL identifies a {expected_event} event"
+        )
 
-    print(f"PR: {owner}/{repo}#{pr_number}")
-    print(f"Fetching branch for PR #{pr_number}...")
-    branch_name = get_pr_branch(owner, repo, pr_number)
-    print(f"Branch: {branch_name}")
+    if pr_number:
+        print(f"PR: {owner}/{repo}#{pr_number}")
+        print(f"Fetching branch for PR #{pr_number}...")
+        branch_name = get_pr_branch(owner, repo, pr_number)
+        print(f"Branch: {branch_name}")
+        debug_context = f"{owner}/{repo} PR #{pr_number} on branch {branch_name}"
+        artifact_scope = f"pr-{pr_number}"
+    else:
+        branch_name = run["head_branch"]
+        print(f"Workflow event: {event}")
+        print(f"Branch from workflow run: {branch_name}")
+        debug_context = f"{owner}/{repo} {event} event on ref {branch_name}"
+        head_sha = run.get("head_sha")
+        # The artifact downloader scopes non-PR runs by the short commit SHA.
+        event_id = (
+            head_sha[:12]
+            if isinstance(head_sha, str) and head_sha
+            else run_id
+        )
+        artifact_scope = f"{event}-{event_id}"
 
     worktree_dirname = branch_name.replace("/", "-")
     worktree_path = AUTHD_REPO.parent / f"authd-{worktree_dirname}"
@@ -161,7 +197,7 @@ def main():
         "--extract '*.html'"
     )
     artifact_path = (
-        f"$HOME/.local/share/authd-e2e-artifacts/pr-{pr_number}/"
+        f"$HOME/.local/share/authd-e2e-artifacts/{artifact_scope}/"
         f"run-{run_id}/{artifact_name}"
     )
 
@@ -169,7 +205,7 @@ def main():
 
     prompt = (
         f"Debug the failed authd end-to-end test run at {github_run_url} for "
-        f"{owner}/{repo} PR #{pr_number} on branch {branch_name}. "
+        f"{debug_context}. "
         "The hosted e2e log is outside GitHub and is not directly accessible "
         f"to you. The corresponding GitHub Actions artifact is "
         f"`{artifact_name}`. Fetch it with the "
