@@ -116,6 +116,28 @@ def get_run_metadata(owner, repo, run_id):
     return run
 
 
+def ensure_debug_branch(branch_name, base_branch):
+    branch_ref = f"refs/heads/{branch_name}"
+    existing = subprocess.run(
+        ["git", "show-ref", "--verify", "--quiet", branch_ref],
+        cwd=AUTHD_REPO,
+    )
+    if existing.returncode == 0:
+        return
+    if existing.returncode != 1:
+        die(f"Could not check whether debug branch {branch_name} exists")
+
+    result = subprocess.run(
+        ["git", "branch", branch_name, base_branch],
+        cwd=AUTHD_REPO,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        error = result.stderr.strip() or result.stdout.strip() or "unknown error"
+        die(f"Could not create debug branch {branch_name} from {base_branch}: {error}")
+
+
 def guake_call(method, *args):
     subprocess.run(
         ["gdbus", "call", "--session",
@@ -155,13 +177,24 @@ def main():
         print(f"Fetching branch for PR #{pr_number}...")
         branch_name = get_pr_branch(owner, repo, pr_number)
         print(f"Branch: {branch_name}")
+        worktree_branch = branch_name
         debug_context = f"{owner}/{repo} PR #{pr_number} on branch {branch_name}"
         artifact_scope = f"pr-{pr_number}"
     else:
         branch_name = run["head_branch"]
         print(f"Workflow event: {event}")
         print(f"Branch from workflow run: {branch_name}")
-        debug_context = f"{owner}/{repo} {event} event on ref {branch_name}"
+        target_branch_segment = re.sub(
+            r"[^A-Za-z0-9_-]+", "-", target
+        ).strip("-_")[:40] or "target"
+        worktree_branch = (
+            f"debug-ci-e2e-{event}-{run_id}-{run_attempt}-{target_branch_segment}"
+        )
+        print(f"Debug branch: {worktree_branch} (based on {branch_name})")
+        debug_context = (
+            f"{owner}/{repo} {event} event on ref {branch_name}, "
+            f"using debug branch {worktree_branch}"
+        )
         head_sha = run.get("head_sha")
         # The artifact downloader scopes non-PR runs by the short commit SHA.
         event_id = (
@@ -171,11 +204,15 @@ def main():
         )
         artifact_scope = f"{event}-{event_id}"
 
-    worktree_dirname = branch_name.replace("/", "-")
+    if not pr_number:
+        print(f"Ensuring debug branch {worktree_branch} exists...")
+        ensure_debug_branch(worktree_branch, branch_name)
+
+    worktree_dirname = worktree_branch.replace("/", "-")
     worktree_path = AUTHD_REPO.parent / f"authd-{worktree_dirname}"
 
     print(f"Ensuring worktree at {worktree_path}...")
-    result = subprocess.run(["authd-worktree", branch_name], cwd=AUTHD_REPO)
+    result = subprocess.run(["authd-worktree", worktree_branch], cwd=AUTHD_REPO)
     if result.returncode != 0:
         die("Failed to create/open worktree")
     if not worktree_path.is_dir():
