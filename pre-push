@@ -5,6 +5,67 @@ set -x
 
 zero=$(git hash-object --stdin </dev/null | tr '[0-9a-f]' '0')
 
+golangci_lint_path_is_relevant() {
+    local path="$1"
+    local dir
+
+    # The broker module has its own linter check below.
+    case "$path" in
+        authd-oidc-brokers|authd-oidc-brokers/*)
+            return 1
+            ;;
+        *.go|go.mod|go.sum|go.work|go.work.sum|*/go.mod|*/go.sum|\
+        */go.work|*/go.work.sum|.golangci.yaml|.golangci.yml|\
+        */.golangci.yaml|*/.golangci.yml|vendor|vendor/*|.gitmodules|.gitignore)
+            return 0
+            ;;
+        internal/users/db/sql/*)
+            return 0
+            ;;
+        # cgo, assembly, and object files matter when their package has Go source.
+        *.c|*.cc|*.cpp|*.cxx|*.m|*.mm|*.h|*.hh|*.hpp|*.hxx|\
+        *.f|*.F|*.for|*.f90|*.s|*.S|*.syso)
+            dir="${path%/*}"
+            if [ "$dir" = "$path" ]; then
+                dir=.
+            fi
+            compgen -G "$dir/*.go" >/dev/null
+            return
+            ;;
+    esac
+    return 1
+}
+
+golangci_lint_paths_are_relevant() {
+    local path
+
+    while IFS= read -r path; do
+        [ -n "$path" ] || continue
+        if golangci_lint_path_is_relevant "$path"; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+check_golangci_lint_inputs() {
+    local changed_paths
+
+    if ! changed_paths=$(git "$@"); then
+        set +x
+        echo >&2 "pre-push: Warning: cannot determine changed files; running golangci-lint"
+        set -x
+        RUN_GOLANGCI_LINT=1
+        return 0
+    fi
+
+    if printf '%s\n' "$changed_paths" | (set +x; golangci_lint_paths_are_relevant); then
+        RUN_GOLANGCI_LINT=1
+    fi
+}
+
+RUN_GOLANGCI_LINT=0
+
 go mod vendor
 
 if cargo metadata --no-deps --frozen --quiet >/dev/null 2>&1; then
@@ -17,24 +78,6 @@ if cargo metadata --no-deps --frozen --quiet >/dev/null 2>&1; then
         echo >&2 "pre-push: Error: cargo fmt failed"
         FAILED=1
     fi
-fi
-
-# Use the version specified in tools/go.mod, installing it only if needed.
-version=$(go mod edit -json "tools/go.mod" | \
-  jq -r '.Require[] | select(.Path | test("golangci-lint")) | .Version')
-if ! command -v golangci-lint >/dev/null 2>&1 || \
-  [ "$(golangci-lint version --short)" != "${version#v}" ]; then
-    go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@"$version"
-fi
-
-# Use a per-worktree cache to prevent stale path references from other worktrees
-export GOLANGCI_LINT_CACHE
-GOLANGCI_LINT_CACHE="$(git rev-parse --absolute-git-dir)/golangci-lint-cache"
-
-if ! golangci-lint run; then
-    set +x
-    echo >&2 "pre-push: Error: golangci-lint failed"
-    FAILED=1
 fi
 
 # Check yamlfmt on .github
@@ -76,12 +119,27 @@ while read local_ref local_oid remote_ref remote_oid; do
         # Handle delete
         :
     else
+        lint_base=""
         if [ "$remote_oid" = "$zero" ]; then
-            # New branch, examine all commits
-            range="$local_oid"
+            # New branch: compare with origin/main when a common base is available.
+            if git rev-parse --verify --quiet "origin/main^{commit}" >/dev/null; then
+                if lint_base=$(git merge-base origin/main "$local_oid" 2>/dev/null); then
+                    range="$lint_base..$local_oid"
+                fi
+            fi
+
+            if [ -z "$lint_base" ]; then
+                # Without a known base, run lint conservatively.
+                range="$local_oid"
+                RUN_GOLANGCI_LINT=1
+            fi
         else
             # Update to existing branch, examine new commits
             range="$remote_oid..$local_oid"
+        fi
+
+        if [ "$remote_oid" != "$zero" ] || [ -n "$lint_base" ]; then
+            check_golangci_lint_inputs diff --ignore-submodules=all --name-only "$range"
         fi
 
         # Check if the strings "DO-NOT-PUSH" are present in the commits being pushed
@@ -114,6 +172,34 @@ while read local_ref local_oid remote_ref remote_oid; do
         fi
     fi
 done
+
+check_golangci_lint_inputs diff --ignore-submodules=all --name-only
+check_golangci_lint_inputs diff --ignore-submodules=all --cached --name-only
+check_golangci_lint_inputs ls-files --others --exclude-standard
+
+if [ "$RUN_GOLANGCI_LINT" -eq 1 ]; then
+    # Use the version specified in tools/go.mod, installing it only if needed.
+    version=$(go mod edit -json "tools/go.mod" | \
+      jq -r '.Require[] | select(.Path | test("golangci-lint")) | .Version')
+    if ! command -v golangci-lint >/dev/null 2>&1 || \
+      [ "$(golangci-lint version --short)" != "${version#v}" ]; then
+        go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@"$version"
+    fi
+
+    # Use a per-worktree cache to prevent stale path references from other worktrees
+    export GOLANGCI_LINT_CACHE
+    GOLANGCI_LINT_CACHE="$(git rev-parse --absolute-git-dir)/golangci-lint-cache"
+
+    if ! golangci-lint run; then
+        set +x
+        echo >&2 "pre-push: Error: golangci-lint failed"
+        FAILED=1
+    fi
+else
+    set +x
+    echo "pre-push: Skipping golangci-lint; no relevant changes"
+    set -x
+fi
 
 set +x
 if [ -n "${FAILED:-}" ]; then

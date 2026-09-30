@@ -16,6 +16,11 @@ ln -sf .scripts/pre-push .git/hooks/pre-push
 The hook formats Robot Framework tests with Robocop. If formatting changes any
 files, the push is rejected so you can review and commit those changes first.
 
+It runs `golangci-lint` when pushed or local changes can affect Go lint results.
+For new branches, it compares against `origin/main`; if that ref or a merge
+base is unavailable, it runs lint conservatively. The lint cache remains per
+worktree to avoid stale paths.
+
 # Usage
 
 Execute the scripts from the authd repo, like this:
