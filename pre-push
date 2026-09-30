@@ -19,10 +19,13 @@ if cargo metadata --no-deps --frozen --quiet >/dev/null 2>&1; then
     fi
 fi
 
-# Install golangci-lint at the version specified in tools/go.mod
+# Use the version specified in tools/go.mod, installing it only if needed.
 version=$(go mod edit -json "tools/go.mod" | \
   jq -r '.Require[] | select(.Path | test("golangci-lint")) | .Version')
-go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@"$version"
+if ! command -v golangci-lint >/dev/null 2>&1 || \
+  [ "$(golangci-lint version --short)" != "${version#v}" ]; then
+    go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@"$version"
+fi
 
 # Use a per-worktree cache to prevent stale path references from other worktrees
 export GOLANGCI_LINT_CACHE
