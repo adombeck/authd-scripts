@@ -13,6 +13,9 @@ To enable the pre-push hook:
 ln -sf .scripts/pre-push .git/hooks/pre-push
 ```
 
+The hook formats Robot Framework tests with Robocop. If formatting changes any
+files, the push is rejected so you can review and commit those changes first.
+
 # Usage
 
 Execute the scripts from the authd repo, like this:
