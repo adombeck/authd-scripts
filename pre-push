@@ -87,6 +87,22 @@ if ! go run github.com/google/yamlfmt/cmd/yamlfmt@latest -lint .github; then
     FAILED=1
 fi
 
+if [ -f .ruff.toml ]; then
+    if ! uv run --with-requirements .ruff-requirements.txt ruff format --check --config .ruff.toml .; then
+        if uv run --with-requirements .ruff-requirements.txt ruff format --config .ruff.toml .; then
+            set +x
+            echo >&2 "pre-push: Error: Ruff formatted Python files; review and commit the changes before pushing"
+            FAILED=1
+            set -x
+        else
+            set +x
+            echo >&2 "pre-push: Error: Ruff formatting failed"
+            FAILED=1
+            set -x
+        fi
+    fi
+fi
+
 if [ -d e2e-tests/tests ]; then
     # Keep the Robocop environment and package cache separate for each worktree.
     git_dir="$(git rev-parse --absolute-git-dir)"
