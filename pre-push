@@ -103,7 +103,7 @@ if [ -f .ruff.toml ]; then
     fi
 fi
 
-if [ -d e2e-tests/tests ]; then
+if [ -d e2e-tests/tests ] && [ -f e2e-tests/pyproject.toml ]; then
     # Keep the Robocop environment and package cache separate for each worktree.
     git_dir="$(git rev-parse --absolute-git-dir)"
     export UV_CACHE_DIR="${git_dir}/uv-cache"
@@ -128,6 +128,10 @@ if [ -d e2e-tests/tests ]; then
             set -x
         fi
     fi
+elif [ -d e2e-tests/tests ]; then
+    set +x
+    echo "pre-push: Skipping Robocop; e2e-tests/pyproject.toml not found"
+    set -x
 fi
 
 while read local_ref local_oid remote_ref remote_oid; do
