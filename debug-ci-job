@@ -92,12 +92,19 @@ def try_gh_api_json(path):
         return None
 
 
-def get_pr_number(owner, repo, run_id, explicit_pr_number):
+def get_workflow_run(owner, repo, run_id):
+    print(f"Fetching workflow run {run_id}...")
+    run = gh_api_json(f"repos/{owner}/{repo}/actions/runs/{run_id}")
+    if not isinstance(run, dict):
+        die(f"Workflow run {run_id} returned an invalid response")
+    return run
+
+
+def get_pr_number(owner, repo, run_id, explicit_pr_number, run):
     if explicit_pr_number:
         return explicit_pr_number
 
     print(f"Fetching PR associated with workflow run {run_id}...")
-    run = gh_api_json(f"repos/{owner}/{repo}/actions/runs/{run_id}")
 
     for pull_request in run.get("pull_requests") or []:
         number = pull_request.get("number")
@@ -143,13 +150,26 @@ def get_pr_number(owner, repo, run_id, explicit_pr_number):
     )
 
 
-def get_pr_branch(owner, repo, number):
-    pull_request = gh_api_json(f"repos/{owner}/{repo}/pulls/{number}")
-    head = pull_request.get("head")
-    branch_name = head.get("ref") if isinstance(head, dict) else None
-    if not branch_name:
-        die(f"PR #{number} does not have a head branch")
-    return branch_name
+def ensure_debug_branch(branch_name, base_ref):
+    branch_ref = f"refs/heads/{branch_name}"
+    existing = subprocess.run(
+        ["git", "show-ref", "--verify", "--quiet", branch_ref],
+        cwd=AUTHD_REPO,
+    )
+    if existing.returncode == 0:
+        return
+    if existing.returncode != 1:
+        die(f"Could not check whether debug branch {branch_name} exists")
+
+    result = subprocess.run(
+        ["git", "branch", branch_name, base_ref],
+        cwd=AUTHD_REPO,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        error = result.stderr.strip() or result.stdout.strip() or "unknown error"
+        die(f"Could not create debug branch {branch_name} from {base_ref}: {error}")
 
 
 def guake_call(method, *args):
@@ -175,18 +195,32 @@ def main():
         die(f"authd repository not found: {AUTHD_REPO}")
 
     owner, repo = "canonical", "authd"
-    pr_number = get_pr_number(owner, repo, run_id, explicit_pr_number)
+    run = get_workflow_run(owner, repo, run_id)
+    pr_number = get_pr_number(owner, repo, run_id, explicit_pr_number, run)
     print(f"PR: {owner}/{repo}#{pr_number}")
 
-    print(f"Fetching branch for PR #{pr_number}...")
-    branch_name = get_pr_branch(owner, repo, pr_number)
-    print(f"Branch: {branch_name}")
+    branch_name = run.get("head_branch")
+    if not isinstance(branch_name, str) or not branch_name:
+        die(f"Workflow run {run_id} did not include a head branch")
+    print(f"Workflow branch: {branch_name}")
 
-    worktree_dirname = branch_name.replace("/", "-")
+    worktree_branch = branch_name
+    if run.get("event") == "push" and branch_name == "main":
+        worktree_branch = f"debug-ci-job-push-{run_id}-{job_id}"
+        head_sha = run.get("head_sha")
+        if not isinstance(head_sha, str) or not head_sha:
+            die(f"Workflow run {run_id} did not include a head commit")
+        print(
+            f"Debug branch: {worktree_branch} "
+            f"(based on {branch_name} at {head_sha})"
+        )
+        ensure_debug_branch(worktree_branch, head_sha)
+
+    worktree_dirname = worktree_branch.replace("/", "-")
     worktree_path = AUTHD_REPO.parent / f"authd-{worktree_dirname}"
 
     print(f"Ensuring worktree at {worktree_path}...")
-    result = subprocess.run(["authd-worktree", branch_name], cwd=AUTHD_REPO)
+    result = subprocess.run(["authd-worktree", worktree_branch], cwd=AUTHD_REPO)
     if result.returncode != 0:
         die("Failed to create/open worktree")
     if not worktree_path.is_dir():
@@ -194,9 +228,15 @@ def main():
 
     print(f"Opening Guake tab for {worktree_path}...")
 
+    debug_context = (
+        f"{owner}/{repo} PR #{pr_number} on workflow branch {branch_name}"
+    )
+    if worktree_branch != branch_name:
+        debug_context += f", using debug branch {worktree_branch}"
+
     prompt = (
         f"Debug the failed GitHub Actions job at {url} for "
-        f"{owner}/{repo} PR #{pr_number} on branch {branch_name}. "
+        f"{debug_context}. "
         f"Inspect the failed job logs with `gh run view {run_id} --job "
         f"{job_id} --log-failed --repo {owner}/{repo}`, identify the root "
         "cause, implement the fix, and run relevant tests."
