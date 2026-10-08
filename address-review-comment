@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
 address-review-comment - create/open a worktree and launch Copilot CLI to
-address a single GitHub PR review comment.
+address GitHub PR review feedback.
 
-Usage: address-review-comment <github-pr-comment-url>
+Usage: address-review-comment <github-pr-feedback-url>
 
 Supports:
   https://github.com/owner/repo/pull/123#discussion_r456789
   https://github.com/owner/repo/pull/123#issuecomment-456789
+  https://github.com/owner/repo/pull/123#pullrequestreview-456789
 """
 
 import re
@@ -28,6 +29,10 @@ REVIEW_COMMENT_URL_RE = re.compile(
 
 ISSUE_COMMENT_URL_RE = re.compile(
     r'https://github\.com/([^/]+)/([^/]+)/pull/(\d+)#issuecomment-(\d+)'
+)
+
+PULL_REQUEST_REVIEW_URL_RE = re.compile(
+    r'https://github\.com/([^/]+)/([^/]+)/pull/(\d+)#pullrequestreview-(\d+)'
 )
 
 
@@ -56,6 +61,19 @@ def get_review_comment(owner, repo, comment_id):
     )
     if result.returncode != 0:
         die(f"Failed to fetch review comment {comment_id}: {result.stderr.strip()}")
+    import json
+    return json.loads(result.stdout)
+
+
+def get_pull_review(owner, repo, number, review_id):
+    """Fetch a pull-request review's body and author."""
+    result = subprocess.run(
+        ["gh", "api", f"repos/{owner}/{repo}/pulls/{number}/reviews/{review_id}",
+         "--jq", '{body, user: .user.login}'],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        die(f"Failed to fetch pull request review {review_id}: {result.stderr.strip()}")
     import json
     return json.loads(result.stdout)
 
@@ -97,9 +115,12 @@ def main():
 
     url = sys.argv[1]
 
-    match = REVIEW_COMMENT_URL_RE.match(url)
-    if match:
-        owner, repo, number, comment_id = match.groups()
+    review_comment_match = REVIEW_COMMENT_URL_RE.match(url)
+    issue_comment_match = ISSUE_COMMENT_URL_RE.match(url)
+    pull_review_match = PULL_REQUEST_REVIEW_URL_RE.match(url)
+
+    if review_comment_match:
+        owner, repo, number, comment_id = review_comment_match.groups()
 
         print(f"Fetching review comment {comment_id} on {owner}/{repo}#{number}...")
         comment = get_review_comment(owner, repo, comment_id)
@@ -112,14 +133,8 @@ def main():
 
         print(f"File: {path}:{line}")
         print(f"Reviewer: {reviewer}")
-    else:
-        match = ISSUE_COMMENT_URL_RE.match(url)
-        if not match:
-            die(f"Unrecognised PR comment URL: {url}\n"
-                "Expected e.g. https://github.com/owner/repo/pull/123#discussion_r456789 "
-                "or https://github.com/owner/repo/pull/123#issuecomment-456789")
-
-        owner, repo, number, comment_id = match.groups()
+    elif issue_comment_match:
+        owner, repo, number, comment_id = issue_comment_match.groups()
 
         print(f"Fetching issue comment {comment_id} on {owner}/{repo}#{number}...")
         comment = get_issue_comment(owner, repo, comment_id)
@@ -131,6 +146,24 @@ def main():
         is_reply = False
 
         print(f"Reviewer: {reviewer}")
+    elif pull_review_match:
+        owner, repo, number, review_id = pull_review_match.groups()
+
+        print(f"Fetching pull request review {review_id} on {owner}/{repo}#{number}...")
+        review = get_pull_review(owner, repo, number, review_id)
+
+        line = None
+        path = None
+        body = review.get("body") or ""
+        reviewer = review.get("user") or "a reviewer"
+        is_reply = False
+
+        print(f"Reviewer: {reviewer}")
+    else:
+        die(f"Unrecognised PR feedback URL: {url}\n"
+            "Expected e.g. https://github.com/owner/repo/pull/123#discussion_r456789, "
+            "https://github.com/owner/repo/pull/123#issuecomment-456789, or "
+            "https://github.com/owner/repo/pull/123#pullrequestreview-456789")
 
     print(f"Fetching branch for PR #{number}...")
     branch_name = get_pr_branch(owner, repo, number)
