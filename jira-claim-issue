@@ -20,7 +20,8 @@ it as-is. Then:
   - Adds it to the active sprint
   - Transitions it to "In Progress"
 
-Only issues in the "Untriaged" or "Triaged" state are changed.
+Claims are limited to issues in "Untriaged" or "Triaged". An issue already
+in "In Progress" is accepted only when assigned to you.
 Reads settings from $CREDENTIALS_FILE.
 When issue metadata changes, records the claim in:
   $CLAIM_HISTORY_FILE
@@ -361,7 +362,9 @@ case "$CURRENT_STATUS_NAME" in
     Untriaged|Triaged)
         ;;
     *)
-        die "Refusing to claim $JIRA_ISSUE_KEY: current status is \"$CURRENT_STATUS_NAME\"; expected Untriaged or Triaged"
+        if [[ "${CURRENT_STATUS_NAME,,}" != "in progress" || "$CURRENT_ASSIGNEE_ID" != "$MY_ACCOUNT_ID" ]]; then
+            die "Refusing to claim $JIRA_ISSUE_KEY: current status is \"$CURRENT_STATUS_NAME\"; expected Untriaged or Triaged, or In Progress assigned to you"
+        fi
         ;;
 esac
 
