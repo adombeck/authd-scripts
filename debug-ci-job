@@ -238,8 +238,14 @@ def main():
         f"Debug the failed GitHub Actions job at {url} for "
         f"{debug_context}. "
         f"Inspect the failed job logs with `gh run view {run_id} --job "
-        f"{job_id} --log-failed --repo {owner}/{repo}`, identify the root "
-        "cause, implement the fix, and run relevant tests."
+        f"{job_id} --log-failed --repo {owner}/{repo}`, identify the exact "
+        "root cause from the available evidence, implement the fix, and run "
+        "relevant tests. If you cannot determine the exact root cause, do not "
+        "guess or claim that it is fixed. Instead, add the smallest targeted "
+        "logging or diagnostic instrumentation needed to ensure that enough "
+        "information is captured the next time this issue occurs to identify "
+        "the cause, without exposing secrets. State what evidence was missing "
+        "and what you added."
     )
     q = shlex.quote(prompt)
     w = shlex.quote(str(worktree_path))
